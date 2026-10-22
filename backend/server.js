@@ -4,287 +4,129 @@ const express = require("express");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const Database = require("better-sqlite3");
 
 const PORT = Number(process.env.PORT || 5050);
 const TOKEN_SECRET = process.env.TOKEN_SECRET || "replace-this-demo-secret-before-production";
-const PASSWORD_SALT = process.env.PASSWORD_SALT || "gst-practice-lab-demo-salt";
+const PASSWORD_SALT = process.env.PASSWORD_SALT || "gst-practice-portal-demo-salt";
 const DATA_DIR = path.join(__dirname, "data");
-const DATA_FILE = path.join(DATA_DIR, "store.json");
-const app = express();
+const DATABASE_PATH = process.env.SQLITE_PATH || path.join(DATA_DIR, "gst-playground.sqlite");
 
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const db = new Database(DATABASE_PATH);
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
+const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-function hashPassword(password) {
-  return crypto.createHash("sha256").update(`${password}:${PASSWORD_SALT}`).digest("hex");
-}
-
-function id() {
-  return crypto.randomUUID();
-}
-
-function now() {
-  return new Date().toISOString();
-}
-
-function scenario(idValue, title, group, kind, difficulty, duration, description, steps, extra = {}) {
-  return { id: idValue, title, group, kind, kindLabel: extra.kindLabel || kind.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()), difficulty, duration, description, steps, instruction: extra.instruction, period: extra.period };
-}
-
-function seedScenarios() {
-  const core = "Core return practice";
-  return [
-    scenario("registration-basic", "Register a regular taxpayer", core, "registration", "Foundation", 25, "Create the taxpayer profile and complete the verification step.", ["Applicant profile", "Business details", "Verification", "Review record"], { kindLabel: "Registration workflow", instruction: "Use the Blue Harbor Supplies profile and review the business details before continuing." }),
-    scenario("gstr1-oct-online", "GSTR-1 online · October", core, "gstr1", "Foundation", 30, "Classify October outward supplies in the online return flow.", ["Review sales register", "Classify supplies", "Check return summary", "Save for review"], { kindLabel: "Outward supplies return", period: "October 2026" }),
-    scenario("gstr1-oct-offline", "GSTR-1 offline · October", core, "offline", "Foundation", 25, "Complete the offline import workflow using a JSON file.", ["Prepare JSON", "Validate file", "Review import summary", "Save for review"], { kindLabel: "Offline return utility", period: "October 2026" }),
-    scenario("gstr2b-oct", "View GSTR-2A / 2B · October", core, "gstr2b", "Intermediate", 28, "Reconcile purchase documents before considering input tax credit.", ["Review purchase register", "Match supplier documents", "Identify exceptions", "Save for review"], { kindLabel: "Purchase reconciliation", period: "October 2026" }),
-    scenario("payment-oct", "Pay tax · October", core, "payment", "Intermediate", 20, "Use the cash and credit ledger to plan the tax payment.", ["Review liability", "Offset eligible credit", "Create challan", "Save for review"], { kindLabel: "Tax payment workflow", period: "October 2026" }),
-    scenario("gstr1-nov-online", "GSTR-1 online · November", core, "gstr1", "Foundation", 30, "Report the November outward-supply period and compare classifications.", ["Review sales register", "Classify supplies", "Check return summary", "Save for review"], { kindLabel: "Outward supplies return", period: "November 2026" }),
-    scenario("gstr1-nov-offline", "GSTR-1 offline · November", core, "offline", "Foundation", 25, "Use a new file for the offline import checkpoint.", ["Prepare JSON", "Validate file", "Review import summary", "Save for review"], { kindLabel: "Offline return utility", period: "November 2026" }),
-    scenario("gstr2b-nov", "View GSTR-2A / 2B · November", core, "gstr2b", "Intermediate", 28, "Review supplier-side information for the November period.", ["Review purchase register", "Match supplier documents", "Identify exceptions", "Save for review"], { kindLabel: "Purchase reconciliation", period: "November 2026" }),
-    scenario("payment-nov", "Pay tax · November", core, "payment", "Intermediate", 20, "Review cash-versus-credit treatment for the November period.", ["Review liability", "Offset eligible credit", "Create challan", "Save for review"], { kindLabel: "Tax payment workflow", period: "November 2026" }),
-    scenario("gstr1-dec-online", "GSTR-1 online · December", core, "gstr1", "Intermediate", 30, "Complete a December outward-supply practice run.", ["Review sales register", "Classify supplies", "Check return summary", "Save for review"], { kindLabel: "Outward supplies return", period: "December 2026" }),
-    scenario("gstr1-dec-offline", "GSTR-1 offline · December", core, "offline", "Intermediate", 25, "Complete the December offline utility route.", ["Prepare JSON", "Validate file", "Review import summary", "Save for review"], { kindLabel: "Offline return utility", period: "December 2026" }),
-    scenario("gstr2b-dec", "View GSTR-2A / 2B · December", core, "gstr2b", "Intermediate", 28, "Review December input-credit evidence before a summary return.", ["Review purchase register", "Match supplier documents", "Identify exceptions", "Save for review"], { kindLabel: "Purchase reconciliation", period: "December 2026" }),
-    scenario("gstr3b-dec-online", "GSTR-3B online · December", core, "gstr3b", "Intermediate", 35, "Bring outward supplies and eligible ITC into the summary return.", ["Review outward supplies", "Review input credit", "Check tax liability", "Save for review"], { kindLabel: "Summary return workflow", period: "December 2026" }),
-    scenario("gstr3b-dec-offline", "GSTR-3B offline · December", core, "offline", "Intermediate", 25, "Complete the offline preparation route for the summary return.", ["Prepare JSON", "Validate file", "Review import summary", "Save for review"], { kindLabel: "Offline return utility", period: "December 2026" }),
-    scenario("nil-registration", "Nil-return taxpayer setup", "Nil return", "registration", "Foundation", 18, "Set up a taxpayer with no activity for the return period.", ["Applicant profile", "Business details", "Verification", "Review record"], { kindLabel: "Registration workflow", period: "October 2026" }),
-    scenario("nil-gstr1", "Nil return · October", "Nil return", "nil", "Foundation", 18, "Declare a no-activity period and explain the verification checks.", ["Confirm no activity", "Select reason", "Add declaration", "Save for review"], { kindLabel: "Nil-return workflow", period: "October 2026" }),
-    scenario("excess-registration", "Excess-ITC taxpayer setup", "Excess ITC", "registration", "Foundation", 18, "Set up the taxpayer context for a credit-heavy purchase period.", ["Applicant profile", "Business details", "Verification", "Review record"], { kindLabel: "Registration workflow", period: "November 2026" }),
-    scenario("excess-additional-documents", "Review additional documents", "Excess ITC", "documents", "Intermediate", 20, "Inspect supporting documents before treating the purchase credit as eligible.", ["Check document register", "Confirm business purpose", "Flag missing evidence", "Save for review"], { kindLabel: "Supporting-document review", period: "November 2026" }),
-    scenario("excess-gstr1-online", "Excess ITC · outward supplies", "Excess ITC", "gstr1", "Intermediate", 26, "Record outward supplies alongside a higher purchase-credit position.", ["Review sales register", "Classify supplies", "Check return summary", "Save for review"], { kindLabel: "Outward supplies return", period: "November 2026" }),
-    scenario("excess-gstr1-offline", "Excess ITC · offline import", "Excess ITC", "offline", "Intermediate", 23, "Complete file validation for the excess-credit case.", ["Prepare JSON", "Validate file", "Review import summary", "Save for review"], { kindLabel: "Offline return utility", period: "November 2026" }),
-    scenario("excess-gstr2b", "Excess ITC · reconcile purchases", "Excess ITC", "gstr2b", "Advanced", 32, "Identify input documents that need investigation before credit is considered.", ["Review purchase register", "Match supplier documents", "Identify exceptions", "Save for review"], { kindLabel: "Purchase reconciliation", period: "November 2026" }),
-    scenario("amend-invoice", "Amend a reported invoice", "Invoice amendment", "amendment", "Intermediate", 22, "Correct an invoice after checking the original document and reason.", ["Find original document", "Choose amendment reason", "Enter corrected values", "Save for review"], { kindLabel: "Invoice amendment", period: "December 2026" }),
-    scenario("eway-registration", "E-way bill taxpayer setup", "E-way bill", "registration", "Foundation", 15, "Prepare the taxpayer record before creating movement data.", ["Applicant profile", "Business details", "Verification", "Review record"], { kindLabel: "Registration workflow", period: "October 2026" }),
-    scenario("eway-online", "Create an e-way bill", "E-way bill", "eway", "Intermediate", 25, "Complete movement, vehicle and goods checks.", ["Enter document details", "Add movement data", "Review goods", "Save for review"], { kindLabel: "E-way bill workflow", period: "October 2026" }),
-    scenario("eway-offline", "E-way bill · offline preparation", "E-way bill", "offline", "Intermediate", 20, "Complete file validation for the e-way bill dataset.", ["Prepare JSON", "Validate file", "Review import summary", "Save for review"], { kindLabel: "Offline utility workflow", period: "October 2026" }),
-    scenario("eway-cancel", "Cancel an e-way bill", "E-way bill", "eway-cancel", "Foundation", 15, "Complete the checks and explanation required before cancelling a movement document.", ["Locate reference", "Select reason", "Add explanation", "Save for review"], { kindLabel: "E-way bill cancellation", period: "October 2026" }),
-    scenario("einvoice-registration", "E-invoice taxpayer setup", "E-invoice", "registration", "Foundation", 15, "Prepare the business context before generating an invoice record.", ["Applicant profile", "Business details", "Verification", "Review record"], { kindLabel: "Registration workflow", period: "October 2026" }),
-    scenario("einvoice-offline", "Create an e-invoice", "E-invoice", "einvoice", "Intermediate", 24, "Complete invoice header and item-level validation in the e-invoice workflow.", ["Enter invoice header", "Add recipient", "Check item value", "Save for review"], { kindLabel: "E-invoice workflow", period: "October 2026" }),
-    scenario("einvoice-cancel", "Cancel an e-invoice", "E-invoice", "einvoice-cancel", "Foundation", 15, "Record the cancellation rationale for an invoice reference.", ["Locate reference", "Select reason", "Add explanation", "Save for review"], { kindLabel: "E-invoice cancellation", period: "October 2026" })
-  ];
-}
-
-function seedStore() {
-  return {
-    users: [
-      { id: "user-instructor", name: "Aarav Instructor", email: "instructor@gstpracticelab.local", passwordHash: hashPassword("Demo@123"), role: "instructor" },
-      { id: "user-student-1", name: "Priya Student", email: "student1@gstpracticelab.local", passwordHash: hashPassword("Demo@123"), role: "student" },
-      { id: "user-student-2", name: "Kiran Learner", email: "student2@gstpracticelab.local", passwordHash: hashPassword("Demo@123"), role: "student" }
+const CASES = [
+  {
+    slug: "regular-october", title: "Regular taxpayer · October", description: "A trading business with local and inter-state outward supplies.", period: "October 2026", sector: "Wholesale trading",
+    taxpayer: { legalName: "Blue Harbor Supplies", tradeName: "Blue Harbor Supplies", gstin: "29AAFCB0000A1Z4", pan: "AAFCB0000A", state: "Karnataka", status: "Active", filingFrequency: "Monthly" },
+    salesInvoices: [
+      { number: "BHS/1021", date: "2026-10-14", recipient: "Aster Retail Pvt Ltd", gstin: "29AABCL1234A1Z9", supply: "B2B", place: "Karnataka", taxable: 18750, tax: 3375, rate: 18 },
+      { number: "BHS/1022", date: "2026-10-18", recipient: "Walk-in recipients", gstin: "", supply: "B2C", place: "Karnataka", taxable: 9400, tax: 1692, rate: 18 },
+      { number: "BHS/1023", date: "2026-10-23", recipient: "Lotus Traders", gstin: "33AACCL9032R1Z8", supply: "B2B", place: "Tamil Nadu", taxable: 14200, tax: 2556, rate: 18 }
     ],
-    scenarios: seedScenarios(),
-    progress: [],
-    submissions: []
-  };
-}
-
-function readStore() {
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    const store = seedStore();
-    fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2));
-    return store;
+    purchaseInvoices: [
+      { number: "UPK-187", supplier: "Uday Paper Works", gstin: "29AAACU1100A1ZQ", taxable: 8900, tax: 1068, match: "Matched" },
+      { number: "KMD-042", supplier: "Kaveri Metals", gstin: "29AACCK2011T1ZX", taxable: 12500, tax: 2250, match: "Matched" },
+      { number: "FRT-711", supplier: "Swift Freight Co.", gstin: "29ABNFS8729E1ZF", taxable: 3600, tax: 648, match: "Action required" }
+    ], ledgers: { cash: 5000, credit: 3966 }
+  },
+  {
+    slug: "nil-october", title: "Nil return · October", description: "A registered business with no reportable activity for the period.", period: "October 2026", sector: "Professional services",
+    taxpayer: { legalName: "North Star Advisory", tradeName: "North Star Advisory", gstin: "29AAGCN4421J1Z0", pan: "AAGCN4421J", state: "Karnataka", status: "Active", filingFrequency: "Monthly" }, salesInvoices: [], purchaseInvoices: [], ledgers: { cash: 0, credit: 0 }
+  },
+  {
+    slug: "itc-review-november", title: "ITC review · November", description: "A purchase-heavy month with one supplier document to investigate.", period: "November 2026", sector: "Manufacturing",
+    taxpayer: { legalName: "Cedar Works India", tradeName: "Cedar Works", gstin: "27AACCC8147N1ZW", pan: "AACCC8147N", state: "Maharashtra", status: "Active", filingFrequency: "Monthly" },
+    salesInvoices: [
+      { number: "CWI/284", date: "2026-11-10", recipient: "Modern Home Stores", gstin: "27AAFCM2209P1ZP", supply: "B2B", place: "Maharashtra", taxable: 24800, tax: 4464, rate: 18 },
+      { number: "CWI/285", date: "2026-11-21", recipient: "Rana Enterprises", gstin: "24AADFR1167M1ZJ", supply: "B2B", place: "Gujarat", taxable: 10600, tax: 1908, rate: 18 }
+    ],
+    purchaseInvoices: [
+      { number: "RAW-118", supplier: "Sona Raw Materials", gstin: "27AAKFS9021E1Z4", taxable: 16800, tax: 3024, match: "Matched" },
+      { number: "PKG-031", supplier: "Paper Pack Solutions", gstin: "27AAIFP0028H1Z5", taxable: 9200, tax: 1656, match: "Matched" },
+      { number: "MCH-209", supplier: "MachPro Tools", gstin: "27AAHCM1001A1ZZ", taxable: 14750, tax: 2655, match: "Action required" }
+    ], ledgers: { cash: 3000, credit: 4680 }
+  },
+  {
+    slug: "interstate-dispatch", title: "Inter-state dispatch", description: "An invoice-led dispatch flow for e-way bill and e-invoice practice.", period: "December 2026", sector: "Distribution",
+    taxpayer: { legalName: "Riverbend Distributors", tradeName: "Riverbend", gstin: "33AAFCR1912B1ZX", pan: "AAFCR1912B", state: "Tamil Nadu", status: "Active", filingFrequency: "Monthly" },
+    salesInvoices: [
+      { number: "RBD/638", date: "2026-12-03", recipient: "Deccan Retail LLP", gstin: "36AAGFD8450H1ZQ", supply: "B2B", place: "Telangana", taxable: 42500, tax: 7650, rate: 18 },
+      { number: "RBD/639", date: "2026-12-08", recipient: "Portside Stores", gstin: "32AAECP1009F1ZW", supply: "B2B", place: "Kerala", taxable: 16200, tax: 2916, rate: 18 }
+    ],
+    purchaseInvoices: [
+      { number: "LOG-044", supplier: "SouthLine Logistics", gstin: "33AAKFS8883B1ZH", taxable: 6800, tax: 1224, match: "Matched" },
+      { number: "STK-726", supplier: "Stockwell India", gstin: "33AAVFS0601L1ZE", taxable: 15400, tax: 2772, match: "Matched" }
+    ], ledgers: { cash: 9200, credit: 3996 }
   }
-  const store = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-  // The scenario catalogue is product-owned seed data. Keep existing learner progress,
-  // while allowing a deployment to receive newly added or corrected scenario metadata.
-  let changed = false;
-  seedScenarios().forEach((seed) => {
-    const existing = store.scenarios.find((item) => item.id === seed.id);
-    if (existing) {
-      if (JSON.stringify(existing) !== JSON.stringify(seed)) { Object.assign(existing, seed); changed = true; }
-    }
-    else { store.scenarios.push(seed); changed = true; }
-  });
-  if (changed) writeStore(store);
-  return store;
+];
+
+const TAXPAYERS = [
+  { legalName: "Aster Retail Pvt Ltd", gstin: "29AABCL1234A1Z9", state: "Karnataka", status: "Active" }, { legalName: "Lotus Traders", gstin: "33AACCL9032R1Z8", state: "Tamil Nadu", status: "Active" }, { legalName: "Modern Home Stores", gstin: "27AAFCM2209P1ZP", state: "Maharashtra", status: "Active" }, { legalName: "Deccan Retail LLP", gstin: "36AAGFD8450H1ZQ", state: "Telangana", status: "Active" }, { legalName: "Portside Stores", gstin: "32AAECP1009F1ZW", state: "Kerala", status: "Active" }
+];
+
+function hashPassword(password) { return crypto.createHash("sha256").update(`${password}:${PASSWORD_SALT}`).digest("hex"); }
+function id() { return crypto.randomUUID(); }
+function now() { return new Date().toISOString(); }
+function numeric(value) { return Math.max(0, Number(value) || 0); }
+function parse(value) { try { return JSON.parse(value); } catch { return null; } }
+function encode(value) { return Buffer.from(JSON.stringify(value)).toString("base64url"); }
+function sum(items, field) { return items.reduce((total, item) => total + numeric(item[field]), 0); }
+
+function setupDatabase() {
+  db.exec(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'student', created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS case_definitions (slug TEXT PRIMARY KEY, position INTEGER NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, period TEXT NOT NULL, sector TEXT NOT NULL, seed_json TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS user_case_state (user_id TEXT NOT NULL, case_slug TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 0, state_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (user_id, case_slug), FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (case_slug) REFERENCES case_definitions(slug));`);
+  const addCase = db.prepare("INSERT INTO case_definitions (slug, position, title, description, period, sector, seed_json) VALUES (@slug, @position, @title, @description, @period, @sector, @seed_json) ON CONFLICT(slug) DO UPDATE SET position=excluded.position, title=excluded.title, description=excluded.description, period=excluded.period, sector=excluded.sector, seed_json=excluded.seed_json");
+  CASES.forEach((entry, position) => addCase.run({ ...entry, position, seed_json: JSON.stringify(entry) }));
+  const addUser = db.prepare("INSERT OR IGNORE INTO users (id, name, email, password_hash, role, created_at) VALUES (@id, @name, @email, @password_hash, @role, @created_at)");
+  [
+    { id: "user-student-1", name: "Priya Student", email: "student1@gstpracticelab.local", role: "student" }, { id: "user-student-2", name: "Kiran Learner", email: "student2@gstpracticelab.local", role: "student" }, { id: "user-instructor", name: "Aarav Instructor", email: "instructor@gstpracticelab.local", role: "instructor" }
+  ].forEach((user) => addUser.run({ ...user, password_hash: hashPassword("Demo@123"), created_at: now() }));
 }
 
-function writeStore(store) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const temporary = `${DATA_FILE}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(store, null, 2));
-  fs.renameSync(temporary, DATA_FILE);
+function seedState(definition) { return { taxpayer: definition.taxpayer, salesInvoices: definition.salesInvoices, purchaseInvoices: definition.purchaseInvoices, ledgers: definition.ledgers, returns: { gstr1: null, gstr2b: null, gstr3b: null, payment: null }, ewayBills: [], eInvoices: [], activities: [{ id: id(), label: "Business case opened", detail: `${definition.title} is ready to explore.`, at: now() }] }; }
+function ensureStates(userId) {
+  const cases = db.prepare("SELECT * FROM case_definitions ORDER BY position").all(); const existing = new Set(db.prepare("SELECT case_slug FROM user_case_state WHERE user_id = ?").all(userId).map((row) => row.case_slug)); const insert = db.prepare("INSERT INTO user_case_state (user_id, case_slug, is_active, state_json, updated_at) VALUES (?, ?, ?, ?, ?)");
+  cases.forEach((item, index) => { if (!existing.has(item.slug)) insert.run(userId, item.slug, index === 0 ? 1 : 0, JSON.stringify(seedState(parse(item.seed_json))), now()); });
+  if (!db.prepare("SELECT case_slug FROM user_case_state WHERE user_id = ? AND is_active = 1").get(userId) && cases[0]) db.prepare("UPDATE user_case_state SET is_active = 1 WHERE user_id = ? AND case_slug = ?").run(userId, cases[0].slug);
 }
+function caseRows(userId) { ensureStates(userId); return db.prepare("SELECT d.slug, d.title, d.description, d.period, d.sector, s.is_active, s.state_json, s.updated_at FROM case_definitions d JOIN user_case_state s ON s.case_slug = d.slug WHERE s.user_id = ? ORDER BY d.position").all(userId); }
+function hydrateRow(row) { return { ...row, is_active: Boolean(row.is_active), state: parse(row.state_json) }; }
+function getActiveCase(userId) { const row = caseRows(userId).find((item) => item.is_active); return row ? hydrateRow(row) : null; }
+function saveState(userId, slug, state) { db.prepare("UPDATE user_case_state SET state_json = ?, updated_at = ? WHERE user_id = ? AND case_slug = ?").run(JSON.stringify(state), now(), userId, slug); }
+function log(state, label, detail) { state.activities.unshift({ id: id(), label, detail, at: now() }); state.activities = state.activities.slice(0, 8); }
+function safeUser(user) { return { id: user.id, name: user.name, email: user.email, role: user.role }; }
+function sign(payload) { const body = encode(payload); const signature = crypto.createHmac("sha256", TOKEN_SECRET).update(body).digest("base64url"); return `${body}.${signature}`; }
+function verify(token) { if (!token || !token.includes(".")) return null; const [body, signature] = token.split("."); const expected = crypto.createHmac("sha256", TOKEN_SECRET).update(body).digest("base64url"); if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null; try { const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")); return payload.exp > Date.now() ? payload : null; } catch { return null; } }
+function allowedOrigin(origin) { const configured = (process.env.FRONTEND_ORIGIN || "").split(",").map((item) => item.trim()).filter(Boolean); return configured.length ? (origin && configured.includes(origin) ? origin : configured[0]) : "*"; }
+function requireAuth(req, res) { const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, ""); const payload = verify(token); const user = payload && db.prepare("SELECT * FROM users WHERE id = ?").get(payload.userId); if (!user) { res.status(401).json({ message: "Please sign in again." }); return null; } return user; }
+function activeFor(req, res) { const user = requireAuth(req, res); if (!user) return null; const active = getActiveCase(user.id); if (!active) { res.status(404).json({ message: "No business case is available." }); return null; } return { user, active }; }
+function publicCase(row) { const { state, state_json, ...metadata } = row; return { ...metadata, summary: { invoices: state.salesInvoices.length, purchaseInvoices: state.purchaseInvoices.length, gstr1: state.returns.gstr1?.status || "Not started", gstr3b: state.returns.gstr3b?.status || "Not started" } }; }
 
-function safeUser(user) {
-  return { id: user.id, name: user.name, email: user.email, role: user.role };
-}
+setupDatabase();
+app.use((req, res, next) => { res.setHeader("Access-Control-Allow-Origin", allowedOrigin(req.headers.origin)); res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization"); res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS"); if (req.method === "OPTIONS") return res.status(204).end(); next(); });
 
-function encode(value) {
-  return Buffer.from(JSON.stringify(value)).toString("base64url");
-}
-
-function sign(payload) {
-  const body = encode(payload);
-  const signature = crypto.createHmac("sha256", TOKEN_SECRET).update(body).digest("base64url");
-  return `${body}.${signature}`;
-}
-
-function verify(token) {
-  if (!token || !token.includes(".")) return null;
-  const [body, receivedSignature] = token.split(".");
-  const expectedSignature = crypto.createHmac("sha256", TOKEN_SECRET).update(body).digest("base64url");
-  if (receivedSignature.length !== expectedSignature.length || !crypto.timingSafeEqual(Buffer.from(receivedSignature), Buffer.from(expectedSignature))) return null;
-  try {
-    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-    return payload.exp > Date.now() ? payload : null;
-  } catch { return null; }
-}
-
-function allowedOrigin(origin) {
-  const configured = (process.env.FRONTEND_ORIGIN || "").split(",").map((item) => item.trim()).filter(Boolean);
-  if (!configured.length) return "*";
-  return origin && configured.includes(origin) ? origin : configured[0];
-}
-
-function send(res, status, data, origin) {
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": allowedOrigin(origin),
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
-    "Cache-Control": "no-store"
-  });
-  res.end(JSON.stringify(data));
-}
-
-function getBody(req) {
-  if (req.body !== undefined) return Promise.resolve(req.body);
-  return new Promise((resolve, reject) => {
-    let raw = "";
-    req.on("data", (chunk) => { raw += chunk; if (raw.length > 1_000_000) reject(new Error("Request body is too large.")); });
-    req.on("end", () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { reject(new Error("Request body must be valid JSON.")); } });
-    req.on("error", reject);
-  });
-}
-
-function auth(req, res, store, origin, role) {
-  const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-  const payload = verify(token);
-  const user = payload && store.users.find((item) => item.id === payload.userId);
-  if (!user) { send(res, 401, { message: "Please sign in again." }, origin); return null; }
-  if (role && user.role !== role) { send(res, 403, { message: "This action is only available to an instructor." }, origin); return null; }
-  return user;
-}
-
-function findScenario(store, scenarioId) {
-  return store.scenarios.find((item) => item.id === scenarioId);
-}
-
-function routePath(url) {
-  return new URL(url, "http://localhost").pathname.replace(/\/$/, "") || "/";
-}
-
-app.use(async (req, res) => {
-  const origin = req.headers.origin;
-  const pathname = routePath(req.url);
-  if (req.method === "OPTIONS") { send(res, 204, {}, origin); return; }
-  try {
-    let store = readStore();
-    if (req.method === "GET" && pathname === "/api/health") { send(res, 200, { ok: true, service: "gst-practice-lab-api", time: now() }, origin); return; }
-
-    if (req.method === "POST" && pathname === "/api/auth/login") {
-      const { email = "", password = "" } = await getBody(req);
-      const user = store.users.find((item) => item.email.toLowerCase() === String(email).toLowerCase());
-      if (!user || user.passwordHash !== hashPassword(String(password))) { send(res, 401, { message: "The email or password is incorrect." }, origin); return; }
-      const token = sign({ userId: user.id, exp: Date.now() + (12 * 60 * 60 * 1000) });
-      send(res, 200, { token, user: safeUser(user) }, origin); return;
-    }
-
-    if (req.method === "GET" && pathname === "/api/auth/me") {
-      const user = auth(req, res, store, origin); if (!user) return;
-      send(res, 200, { user: safeUser(user) }, origin); return;
-    }
-
-    if (req.method === "GET" && pathname === "/api/scenarios") {
-      const user = auth(req, res, store, origin); if (!user) return;
-      send(res, 200, { scenarios: store.scenarios }, origin); return;
-    }
-
-    const scenarioMatch = pathname.match(/^\/api\/scenarios\/([a-z0-9-]+)$/);
-    if (req.method === "GET" && scenarioMatch) {
-      const user = auth(req, res, store, origin); if (!user) return;
-      const found = findScenario(store, scenarioMatch[1]);
-      if (!found) { send(res, 404, { message: "Scenario not found." }, origin); return; }
-      send(res, 200, { scenario: found }, origin); return;
-    }
-
-    if (req.method === "GET" && pathname === "/api/progress") {
-      const user = auth(req, res, store, origin, "student"); if (!user) return;
-      send(res, 200, { progress: store.progress.filter((item) => item.userId === user.id) }, origin); return;
-    }
-
-    const progressMatch = pathname.match(/^\/api\/progress\/([a-z0-9-]+)$/);
-    if (req.method === "PATCH" && progressMatch) {
-      const user = auth(req, res, store, origin, "student"); if (!user) return;
-      const found = findScenario(store, progressMatch[1]);
-      if (!found) { send(res, 404, { message: "Scenario not found." }, origin); return; }
-      const body = await getBody(req);
-      let progress = store.progress.find((item) => item.userId === user.id && item.scenarioId === found.id);
-      if (!progress) { progress = { id: id(), userId: user.id, scenarioId: found.id, status: "started", stage: 0, feedback: "", snapshot: {}, updatedAt: now() }; store.progress.push(progress); }
-      if (["started", "needs_changes"].includes(body.status)) progress.status = body.status;
-      if (Number.isFinite(Number(body.stage))) progress.stage = Math.max(0, Math.min(found.steps.length - 1, Number(body.stage)));
-      if (body.snapshot && typeof body.snapshot === "object") progress.snapshot = body.snapshot;
-      progress.updatedAt = now();
-      writeStore(store);
-      send(res, 200, { progress }, origin); return;
-    }
-
-    if (req.method === "POST" && pathname === "/api/submissions") {
-      const user = auth(req, res, store, origin, "student"); if (!user) return;
-      const body = await getBody(req);
-      const found = findScenario(store, body.scenarioId);
-      if (!found) { send(res, 404, { message: "Scenario not found." }, origin); return; }
-      const pending = store.submissions.find((item) => item.userId === user.id && item.scenarioId === found.id && item.status === "submitted");
-      if (pending) { send(res, 409, { message: "This scenario is already waiting for instructor review." }, origin); return; }
-      const submission = { id: id(), userId: user.id, scenarioId: found.id, notes: String(body.notes || "").slice(0, 1000), output: body.output && typeof body.output === "object" ? body.output : {}, status: "submitted", feedback: "", submittedAt: now(), reviewedAt: null };
-      store.submissions.unshift(submission);
-      let progress = store.progress.find((item) => item.userId === user.id && item.scenarioId === found.id);
-      if (!progress) { progress = { id: id(), userId: user.id, scenarioId: found.id, stage: found.steps.length - 1, feedback: "", snapshot: submission.output, updatedAt: now() }; store.progress.push(progress); }
-      progress.status = "submitted"; progress.stage = found.steps.length - 1; progress.snapshot = submission.output; progress.updatedAt = now();
-      writeStore(store);
-      send(res, 201, { submission }, origin); return;
-    }
-
-    if (req.method === "GET" && pathname === "/api/review-queue") {
-      const user = auth(req, res, store, origin, "instructor"); if (!user) return;
-      const submissions = store.submissions.map((item) => {
-        const student = store.users.find((candidate) => candidate.id === item.userId);
-        const scenarioData = findScenario(store, item.scenarioId);
-        return { ...item, studentName: student ? student.name : "Unknown student", studentEmail: student ? student.email : "", scenarioTitle: scenarioData ? scenarioData.title : "Unknown scenario", group: scenarioData ? scenarioData.group : "" };
-      });
-      send(res, 200, { submissions }, origin); return;
-    }
-
-    const reviewMatch = pathname.match(/^\/api\/submissions\/([a-f0-9-]+)\/review$/);
-    if (req.method === "POST" && reviewMatch) {
-      const user = auth(req, res, store, origin, "instructor"); if (!user) return;
-      const body = await getBody(req);
-      if (!["approved", "needs_changes"].includes(body.reviewStatus)) { send(res, 400, { message: "Choose approved or needs_changes." }, origin); return; }
-      const submission = store.submissions.find((item) => item.id === reviewMatch[1]);
-      if (!submission) { send(res, 404, { message: "Submission not found." }, origin); return; }
-      submission.status = body.reviewStatus; submission.feedback = String(body.feedback || "").slice(0, 1000); submission.reviewedAt = now(); submission.reviewerId = user.id;
-      const progress = store.progress.find((item) => item.userId === submission.userId && item.scenarioId === submission.scenarioId);
-      if (progress) { progress.status = body.reviewStatus; progress.feedback = submission.feedback; progress.updatedAt = now(); }
-      writeStore(store);
-      send(res, 200, { submission }, origin); return;
-    }
-
-    if (req.method === "GET" && pathname === "/api/students") {
-      const user = auth(req, res, store, origin, "instructor"); if (!user) return;
-      const students = store.users.filter((item) => item.role === "student").map((student) => {
-        const records = store.progress.filter((item) => item.userId === student.id);
-        return { ...safeUser(student), started: records.filter((item) => item.status !== "available").length, reviewed: records.filter((item) => item.status === "approved").length };
-      });
-      send(res, 200, { students }, origin); return;
-    }
-
-    send(res, 404, { message: "Route not found." }, origin);
-  } catch (error) {
-    console.error(error);
-    send(res, 500, { message: error.message || "An unexpected error occurred." }, origin);
-  }
+app.get("/api/health", (req, res) => res.json({ ok: true, service: "gst-practice-portal-api", database: "sqlite", time: now() }));
+app.post("/api/auth/login", (req, res) => { const email = String(req.body?.email || "").trim().toLowerCase(); const password = String(req.body?.password || ""); const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email); if (!user || user.password_hash !== hashPassword(password)) return res.status(401).json({ message: "The email or password is incorrect." }); ensureStates(user.id); const token = sign({ userId: user.id, exp: Date.now() + 12 * 60 * 60 * 1000 }); res.json({ token, user: safeUser(user) }); });
+app.get("/api/auth/me", (req, res) => { const user = requireAuth(req, res); if (user) res.json({ user: safeUser(user) }); });
+app.get("/api/portal", (req, res) => { const user = requireAuth(req, res); if (!user) return; const rows = caseRows(user.id).map(hydrateRow); const active = rows.find((item) => item.is_active); res.json({ user: safeUser(user), activeCase: active && { ...publicCase(active), state: active.state }, cases: rows.map(publicCase) }); });
+app.post("/api/portal/cases/:slug/activate", (req, res) => { const user = requireAuth(req, res); if (!user) return; const target = db.prepare("SELECT slug FROM case_definitions WHERE slug = ?").get(req.params.slug); if (!target) return res.status(404).json({ message: "Business case not found." }); ensureStates(user.id); const transaction = db.transaction(() => { db.prepare("UPDATE user_case_state SET is_active = 0 WHERE user_id = ?").run(user.id); db.prepare("UPDATE user_case_state SET is_active = 1, updated_at = ? WHERE user_id = ? AND case_slug = ?").run(now(), user.id, target.slug); }); transaction(); res.json({ ok: true, activeCase: getActiveCase(user.id).slug }); });
+app.post("/api/portal/returns/:type", (req, res) => {
+  const context = activeFor(req, res); if (!context) return; const { user, active } = context; const state = active.state; const type = req.params.type; const salesTaxable = sum(state.salesInvoices, "taxable"); const outputTax = sum(state.salesInvoices, "tax"); const eligiblePurchases = state.purchaseInvoices.filter((invoice) => invoice.match === "Matched"); const eligibleItc = sum(eligiblePurchases, "tax"); const heldItc = sum(state.purchaseInvoices.filter((invoice) => invoice.match !== "Matched"), "tax");
+  if (type === "gstr1") { const b2b = state.salesInvoices.filter((invoice) => invoice.supply === "B2B"); state.returns.gstr1 = { reference: `GSTR1-${active.period.replace(/\s/g, "").toUpperCase()}`, status: "Prepared", period: active.period, invoices: state.salesInvoices.length, b2b: b2b.length, b2c: state.salesInvoices.length - b2b.length, taxable: salesTaxable, tax: outputTax, updatedAt: now() }; log(state, "GSTR-1 prepared", `${state.salesInvoices.length} outward-supply documents are included.`); }
+  else if (type === "gstr2b") { state.returns.gstr2b = { status: "Reconciled", period: active.period, matched: eligiblePurchases.length, actionRequired: state.purchaseInvoices.length - eligiblePurchases.length, eligibleItc, heldItc, updatedAt: now() }; log(state, "GSTR-2B reconciled", `Eligible ITC is ₹${eligibleItc.toLocaleString("en-IN")}; ₹${heldItc.toLocaleString("en-IN")} needs review.`); }
+  else if (type === "gstr3b") { const liability = Math.max(0, outputTax - eligibleItc); state.returns.gstr3b = { status: "Prepared", period: active.period, outwardTaxable: salesTaxable, outputTax, eligibleItc, liability, updatedAt: now() }; log(state, "GSTR-3B prepared", `Net tax liability works out to ₹${liability.toLocaleString("en-IN")}.`); }
+  else return res.status(400).json({ message: "This return is not available." });
+  saveState(user.id, active.slug, state); res.json({ return: state.returns[type], state });
 });
-
-app.listen(PORT, () => console.log(`GST Practice Lab Express API listening on http://localhost:${PORT}`));
+app.post("/api/portal/payment", (req, res) => { const context = activeFor(req, res); if (!context) return; const { user, active } = context; const state = active.state; const liability = numeric(state.returns.gstr3b?.liability); if (!state.returns.gstr3b) return res.status(400).json({ message: "Prepare GSTR-3B before creating a payment challan." }); const creditOffset = Math.min(numeric(req.body?.creditOffset || state.ledgers.credit), state.ledgers.credit, liability); const cashPayment = Math.max(0, liability - creditOffset); if (cashPayment > state.ledgers.cash) return res.status(400).json({ message: "The requested cash balance is not available in this practice ledger." }); state.ledgers.credit -= creditOffset; state.ledgers.cash -= cashPayment; state.returns.payment = { reference: `CPIN-${Math.floor(100000 + Math.random() * 900000)}`, status: "Created", liability, creditOffset, cashPayment, createdAt: now() }; log(state, "Payment challan created", `Credit offset ₹${creditOffset.toLocaleString("en-IN")} and cash payment ₹${cashPayment.toLocaleString("en-IN")} recorded.`); saveState(user.id, active.slug, state); res.status(201).json({ payment: state.returns.payment, state }); });
+app.post("/api/portal/documents/:type", (req, res) => { const context = activeFor(req, res); if (!context) return; const { user, active } = context; const state = active.state; const type = req.params.type; const invoice = state.salesInvoices.find((item) => item.number === req.body?.invoiceNumber); if (!invoice) return res.status(400).json({ message: "Choose an outward-supply invoice from this business case." }); if (type === "eway") { const transporterId = String(req.body?.transporterId || "").trim(); const vehicleNumber = String(req.body?.vehicleNumber || "").trim(); if (!transporterId || !vehicleNumber) return res.status(400).json({ message: "Enter the transporter ID and vehicle number." }); const document = { number: `EWB-${Math.floor(100000000000 + Math.random() * 899999999999)}`, invoiceNumber: invoice.number, transporterId, vehicleNumber, status: "Generated", createdAt: now() }; state.ewayBills.unshift(document); log(state, "E-way bill generated", `${document.number} was generated for ${invoice.number}.`); } else if (type === "einvoice") { const document = { irn: crypto.createHash("sha256").update(`${invoice.number}:${now()}`).digest("hex").slice(0, 32).toUpperCase(), invoiceNumber: invoice.number, acknowledgement: `ACK-${Math.floor(100000000 + Math.random() * 899999999)}`, status: "Generated", createdAt: now() }; state.eInvoices.unshift(document); log(state, "E-invoice generated", `IRN created for ${invoice.number}.`); } else return res.status(400).json({ message: "This document type is not available." }); saveState(user.id, active.slug, state); res.status(201).json({ document: type === "eway" ? state.ewayBills[0] : state.eInvoices[0], state }); });
+app.get("/api/portal/taxpayers", (req, res) => { const user = requireAuth(req, res); if (!user) return; const query = String(req.query.query || "").trim().toLowerCase(); const taxpayers = query ? TAXPAYERS.filter((item) => `${item.legalName} ${item.gstin}`.toLowerCase().includes(query)).slice(0, 8) : []; res.json({ taxpayers }); });
+app.post("/api/portal/reset", (req, res) => { const context = activeFor(req, res); if (!context) return; const { user, active } = context; const definition = db.prepare("SELECT seed_json FROM case_definitions WHERE slug = ?").get(active.slug); const state = seedState(parse(definition.seed_json)); log(state, "Business case reset", "The original practice data has been restored."); saveState(user.id, active.slug, state); res.json({ state }); });
+app.use((error, req, res, next) => { console.error(error); res.status(500).json({ message: error.message || "An unexpected error occurred." }); });
+app.listen(PORT, () => console.log(`GST Practice Portal API listening on http://localhost:${PORT} using SQLite`));
