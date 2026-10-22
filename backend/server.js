@@ -83,10 +83,12 @@ function setupDatabase() {
     CREATE TABLE IF NOT EXISTS user_case_state (user_id TEXT NOT NULL, case_slug TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 0, state_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (user_id, case_slug), FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (case_slug) REFERENCES case_definitions(slug));`);
   const addCase = db.prepare("INSERT INTO case_definitions (slug, position, title, description, period, sector, seed_json) VALUES (@slug, @position, @title, @description, @period, @sector, @seed_json) ON CONFLICT(slug) DO UPDATE SET position=excluded.position, title=excluded.title, description=excluded.description, period=excluded.period, sector=excluded.sector, seed_json=excluded.seed_json");
   CASES.forEach((entry, position) => addCase.run({ ...entry, position, seed_json: JSON.stringify(entry) }));
-  const addUser = db.prepare("INSERT OR IGNORE INTO users (id, name, email, password_hash, role, created_at) VALUES (@id, @name, @email, @password_hash, @role, @created_at)");
+  db.prepare("DELETE FROM user_case_state WHERE user_id NOT IN ('user-student-demo', 'user-instructor-demo')").run();
+  db.prepare("DELETE FROM users WHERE id NOT IN ('user-student-demo', 'user-instructor-demo')").run();
+  const addUser = db.prepare("INSERT INTO users (id, name, email, password_hash, role, created_at) VALUES (@id, @name, @email, @password_hash, @role, @created_at) ON CONFLICT(id) DO UPDATE SET name=excluded.name, email=excluded.email, password_hash=excluded.password_hash, role=excluded.role");
   [
-    { id: "user-student-1", name: "Priya Student", email: "student1@gstpracticelab.local", role: "student" }, { id: "user-student-2", name: "Kiran Learner", email: "student2@gstpracticelab.local", role: "student" }, { id: "user-instructor", name: "Aarav Instructor", email: "instructor@gstpracticelab.local", role: "instructor" }
-  ].forEach((user) => addUser.run({ ...user, password_hash: hashPassword("Demo@123"), created_at: now() }));
+    { id: "user-student-demo", name: "Student", email: "student@demo.com", role: "student" }, { id: "user-instructor-demo", name: "Instructor", email: "instructor@demo.com", role: "instructor" }
+  ].forEach((user) => addUser.run({ ...user, password_hash: hashPassword("12345"), created_at: now() }));
 }
 
 function seedState(definition) { return { taxpayer: definition.taxpayer, salesInvoices: definition.salesInvoices, purchaseInvoices: definition.purchaseInvoices, ledgers: definition.ledgers, returns: { gstr1: null, gstr2b: null, gstr3b: null, payment: null }, ewayBills: [], eInvoices: [], activities: [{ id: id(), label: "Business case opened", detail: `${definition.title} is ready to explore.`, at: now() }] }; }

@@ -42,8 +42,8 @@ function Table({ columns, rows, empty = "No records are available in this busine
 }
 
 function Login({ onLogin }) {
-  const [email, setEmail] = useState("student1@gstpracticelab.local");
-  const [password, setPassword] = useState("Demo@123");
+  const [email, setEmail] = useState("student@demo.com");
+  const [password, setPassword] = useState("12345");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const submit = async (event) => {

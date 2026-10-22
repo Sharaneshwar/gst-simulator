@@ -35,7 +35,8 @@ Demo logins:
 
 | Account | Email | Password |
 | --- | --- | --- |
-| Sample learner | `student1@gstpracticelab.local` | `Demo@123` |
+| Student | `student@demo.com` | `12345` |
+| Instructor | `instructor@demo.com` | `12345` |
 
 ## Deploy the API to Render
 
