@@ -105,7 +105,7 @@ async function createOtpService({ db, secret, sendEmail, now = Date.now }) {
       await db
         .prepare("UPDATE otp_challenges SET state = 'failed' WHERE id = ?")
         .run(id);
-      if (error.status === 503) throw error;
+      if (error.status === 503 || error.status === 429) throw error;
       failure(
         "Unable to send the OTP email. Check the backend mail settings and try again after 60 seconds.",
         502,

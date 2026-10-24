@@ -33,6 +33,7 @@ const PASSWORD_SALT =
   process.env.PASSWORD_SALT || "gst-practice-portal-demo-salt";
 const db = createDatabase();
 const app = express();
+app.locals.mailer = createMailer();
 app.locals.sendInvitation = createInvitationMailer();
 app.use(express.json({ limit: "1mb" }));
 
@@ -671,7 +672,7 @@ const ready = (async () => {
   app.locals.otpService = await createOtpService({
     db,
     secret: process.env.OTP_SECRET || TOKEN_SECRET,
-    sendEmail: createMailer().sendOtp,
+    sendEmail: app.locals.mailer.sendOtp,
   });
 })();
 // Register immediately, but never serve partially initialized storage.
@@ -712,6 +713,26 @@ mountAccess(app, {
   saveState,
   legacySalt: PASSWORD_SALT,
   secret: TOKEN_SECRET,
+});
+app.get("/api/instructor/email-status", async (req, res) => {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+  if (user.role !== "instructor")
+    return res.status(403).json({ message: "Instructor access is required." });
+  const provider = app.locals.mailer.provider();
+  try {
+    await app.locals.mailer.verify();
+    res.json({ provider, verified: true });
+  } catch (error) {
+    res
+      .status(error.status || 502)
+      .json({
+        provider,
+        verified: false,
+        message:
+          "Email provider verification failed. Check backend credentials and sender approval.",
+      });
+  }
 });
 app.get("/api/auth/me", async (req, res) => {
   const user = await requireAuth(req, res);

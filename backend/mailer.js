@@ -1,6 +1,6 @@
 "use strict";
 
-const nodemailer = require("nodemailer");
+const { createEmailTransport } = require("./email-transport");
 
 const PURPOSE_NAMES = {
   "registration-start": "Registration verification",
@@ -21,50 +21,17 @@ function escapeHtml(value) {
   );
 }
 
-function createMailer(
-  env = process.env,
-  createTransport = nodemailer.createTransport,
-) {
-  let transporter;
-  function settings() {
-    const user = String(env.SMTP_USER || "").trim();
-    const pass = String(env.SMTP_PASS || "").replace(/\s/g, "");
-    if (!user || !pass) {
-      const error = new Error(
-        "Email delivery is not configured. Set SMTP_USER and SMTP_PASS in the backend environment.",
-      );
-      error.status = 503;
-      throw error;
-    }
-    return { user, pass };
-  }
-  function transport() {
-    const { user, pass } = settings();
-    const port = Number(env.SMTP_PORT || 465);
-    return (transporter ||= createTransport({
-      host: env.SMTP_HOST || "smtp.gmail.com",
-      port,
-      secure: port === 465,
-      requireTLS: port !== 465,
-      auth: { user, pass },
-      connectionTimeout: 15000,
-      greetingTimeout: 15000,
-      socketTimeout: 20000,
-      disableFileAccess: true,
-      disableUrlAccess: true,
-      logger: false,
-      debug: false,
-    }));
-  }
+function createMailer(env = process.env, createTransport, fetchImpl) {
+  const transport = createEmailTransport(env, { createTransport, fetchImpl });
   async function sendOtp({ to, code, purpose }) {
-    const { user } = settings();
+    const user = transport.senderEmail();
     const shared =
       purpose === "registration-start" || purpose === "delivery-test";
     const heading = PURPOSE_NAMES[purpose] || "Email verification";
     const instructions = shared
       ? "Enter this same OTP in both the Mobile OTP and Email OTP fields. You receive just this one email; no SMS is sent."
       : "Enter this OTP in the verification field to continue.";
-    const result = await transport().sendMail({
+    const result = await transport.sendMail({
       from: { name: "GST Simulator", address: user },
       to: { address: to },
       subject: `GST Simulator — ${heading} OTP`,
@@ -75,7 +42,12 @@ function createMailer(
       throw new Error("The email server did not accept the message.");
     return { messageId: result.messageId };
   }
-  return { sendOtp, verify: () => transport().verify() };
+  return {
+    sendOtp,
+    verify: transport.verify,
+    provider: transport.provider,
+    senderEmail: transport.senderEmail,
+  };
 }
 
 module.exports = { createMailer };

@@ -48,6 +48,33 @@ after(async () => {
   fs.rmSync(directory, { recursive: true });
 });
 
+test("email provider verification is instructor-only and does not send messages", async () => {
+  assert.equal(
+    (await request("/instructor/email-status", undefined, "")).status,
+    401,
+  );
+  assert.equal(
+    (await request("/instructor/email-status", undefined, student)).status,
+    403,
+  );
+  const previous = app.locals.mailer;
+  let verifications = 0;
+  app.locals.mailer = {
+    provider: () => "brevo",
+    verify: async () => {
+      verifications++;
+    },
+  };
+  try {
+    const result = await request("/instructor/email-status");
+    assert.equal(result.status, 200);
+    assert.equal(result.provider, "brevo");
+    assert.equal(result.verified, true);
+    assert.equal(verifications, 1);
+  } finally {
+    app.locals.mailer = previous;
+  }
+});
 test("email access checks reject unknown emails and normalize invited addresses", async () => {
   assert.equal(
     (await request("/auth/access-check", { email: "unknown@example.com" }, ""))

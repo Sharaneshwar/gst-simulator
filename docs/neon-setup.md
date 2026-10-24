@@ -10,7 +10,7 @@ Set the following privately in Render and `backend/.env`:
 - `DATABASE_URL_UNPOOLED`: direct URL to the same database, used for versioned migrations.
 - `TOKEN_SECRET`, `OTP_SECRET`: stable random secrets; changing them invalidates sessions or outstanding OTPs.
 - `FRONTEND_ORIGIN`: the Vercel origin.
-- Existing mail settings; Gmail SMTP ports are blocked on Render Free, independently of the database migration.
+- `MAIL_PROVIDER=brevo`, `BREVO_API_KEY` and `EMAIL_FROM` for verified Brevo HTTPS delivery. Gmail SMTP ports are blocked on Render Free; keep SMTP credentials only for local SMTP use.
 
 No database password, OTP secret, or signing key belongs in Vercel's browser environment or Git. Root `.env.local` and backend `.env*` are ignored. The application uses a module-scoped pool with at most five connections, verified TLS for Neon URLs, idle error handling, transaction-scoped connections and advisory locks for OTP operations.
 

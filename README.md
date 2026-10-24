@@ -40,15 +40,15 @@ See [the local review guide](docs/local-review.md) for suggested browser checks 
 
 ## Email OTPs
 
-Set `SMTP_USER` and `SMTP_PASS` in `backend/.env` (see `backend/.env.example`). The server loads this file automatically, and it is excluded from Git. Messages are sent as **GST Simulator** using the configured email address. Never put these credentials in the frontend or commit the `.env` file.
+On Render Free, set `MAIL_PROVIDER=brevo`, `BREVO_API_KEY` and `EMAIL_FROM` in the backend environment. Verify that sender in Brevo first. The same HTTPS transport sends OTPs and account invitations as **GST Simulator**. For local use, a present `BREVO_API_KEY` automatically selects Brevo, and the existing `SMTP_USER` can supply the sender when `EMAIL_FROM` is unset. Never put these credentials in the frontend or commit `.env` files. Brevo may rewrite free-domain senders such as Gmail to its compliant sender domain; use a verified custom domain for branded sender addresses.
 
 Registration sends one email containing one code; learners use the same code in the Mobile OTP and Email OTP fields. No SMS is sent. TRN resume and registration/return filing also send real email verification codes. Demo login addresses remain unchanged; filing dialogs ask for an actual email address to receive the OTP.
 
 Codes are cryptographically generated, hashed in SQLite, valid for 10 minutes, limited to five failed attempts and consumed once. Resending waits 60 seconds and invalidates the previous challenge. Sending is rate-limited per account and email address. Codes are bound to the user, business, purpose and filing details. Failed deliveries never fall back to a hard-coded OTP.
 
-Run `node scripts/check-email.js` from `backend` to verify SMTP authentication without sending a message. Add `--send-self` to send one delivery-test email to the configured sender's inbox. Automated tests use an in-process mock mail transport and never send real messages.
+Run `node scripts/check-email.js` from `backend` to verify the provider credentials and active configured sender without sending a message. Add `--send-self` to send one delivery-test email to the configured sender's inbox. Automated tests mock SMTP and HTTPS transports and never send real messages. Provider acceptance is not a guarantee of inbox delivery.
 
-Gmail SMTP works on local or SMTP-enabled hosting. Render Free blocks SMTP ports 25, 465 and 587, so this SMTP configuration will not send emails from that hosting tier; an email HTTP API or SMTP-enabled backend host is needed there. Keep a strong `TOKEN_SECRET` (or separate `OTP_SECRET`) in the backend environment.
+Gmail SMTP remains available for local or SMTP-enabled hosting by setting `MAIL_PROVIDER=smtp`, `SMTP_USER` and `SMTP_PASS`. Render Free blocks SMTP ports 25, 465 and 587; Brevo uses HTTPS on port 443 instead. Brevo failures never retry through SMTP or silently fall back to hard-coded OTPs. Keep a strong `TOKEN_SECRET` and `OTP_SECRET` in the backend environment.
 
 Demo logins:
 

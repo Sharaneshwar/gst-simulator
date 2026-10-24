@@ -9,10 +9,12 @@ const { createMailer } = require("../mailer");
 (async () => {
   const mailer = createMailer();
   await mailer.verify();
-  console.log("SMTP connection and authentication verified.");
+  console.log(
+    `Email provider (${mailer.provider()}) and configured sender verified.`,
+  );
   if (process.argv.includes("--send-self")) {
     await mailer.sendOtp({
-      to: String(process.env.SMTP_USER || "").trim(),
+      to: mailer.senderEmail(),
       code: String(crypto.randomInt(100000, 1000000)),
       purpose: "delivery-test",
     });
@@ -22,7 +24,7 @@ const { createMailer } = require("../mailer");
   }
 })().catch((error) => {
   console.error(
-    `Email check failed (${error.code || error.status || "SMTP_ERROR"}). Check SMTP_USER / SMTP_PASS and SMTP connectivity. Credentials and OTPs have not been logged.`,
+    `Email check failed (${error.code || error.status || "EMAIL_ERROR"}). Check provider credentials and sender verification. Credentials and OTPs have not been logged.`,
   );
   process.exitCode = 1;
 });
