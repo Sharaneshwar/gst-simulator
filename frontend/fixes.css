@@ -1,0 +1,123 @@
+.national-emblem {
+  width: 66px;
+  height: 77px;
+  object-fit: contain;
+  flex: none;
+}
+.panel, .two-columns > *, .document-layout > * { min-width: 0; }
+.drawer-heading {
+  display: none;
+}
+@media (max-width: 760px) {
+  .drawer-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 22px 18px;
+    color: #354f82;
+  }
+  .drawer-heading button {
+    font-size: 28px;
+    line-height: 1;
+    border: 0;
+    background: none;
+    color: #354f82;
+  }
+}
+.editable-table th:first-child {
+  min-width: 280px;
+}
+.editable-table th {
+  min-width: 110px;
+}
+.editable-table td {
+  padding: 8px;
+}
+.editable-table input {
+  width: 100%;
+  min-width: 90px;
+  padding: 8px 6px;
+  border: 1px solid #ccc;
+  font-size: 12px;
+  background: #fff;
+}
+.editable-table input:disabled {
+  background: #eee;
+  color: #999;
+}
+.modal-error {
+  color: #a53030;
+  border: 1px solid #e2b9b7;
+  background: #fbebeb;
+  padding: 12px;
+  line-height: 1.6;
+  margin-bottom: 18px;
+  font-size: 12px;
+}
+@media (max-width: 1100px) {
+  .national-emblem {
+    width: 53px;
+    height: 65px;
+  }
+  .identity small {
+    font-size: 15px;
+  }
+  .identity strong {
+    font-size: 26px;
+  }
+}
+@media (max-width: 760px) {
+  .national-emblem {
+    width: 40px;
+    height: 57px;
+  }
+  .identity strong {
+    font-size: 20px;
+  }
+  .identity small {
+    font-size: 11px;
+    line-height: 1.5;
+    max-width: 250px;
+  }
+  .identity {
+    gap: 12px;
+  }
+  .masthead-inner {
+    gap: 10px;
+  }
+  .identity span {
+    min-width: 0;
+  }
+  .hamburger {
+    flex: none;
+  }
+}
+@media (max-width: 390px) {
+  .identity strong {
+    font-size: 17px;
+  }
+  .identity small {
+    font-size: 10px;
+  }
+  .national-emblem {
+    width: 34px;
+    height: 50px;
+  }
+  .identity {
+    gap: 8px;
+  }
+}
+@media print {
+  .site main > .container:has(dialog[open]) {
+    display: block !important;
+  }
+  .site main > .container:has(dialog[open]) > :not(dialog) {
+    display: none !important;
+  }
+  .modal .print-sheet {
+    display: block;
+  }
+  .modal .modal-error {
+    display: none;
+  }
+}

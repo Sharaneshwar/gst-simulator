@@ -1,15 +1,16 @@
 # GST Practice Portal
 
-An original, connected GST workflow playground for a practical Tally Prime with GST course. It gives students a familiar portal-like experience without course lessons, assignments, grading, or instructor-review screens.
+A GST portal practice environment for a practical Tally Prime with GST course. The interface follows the GST portal observed on 24 October 2026: masthead, navigation, homepage, login, registration forms, return tiles, section tables and payment routes. There are no lessons, assignments, grading or instructor-review screens.
 
-Every business case has one shared data model: taxpayer profile, outward invoices, purchase invoices, ledgers, returns, e-way bills, and e-invoices. A learner can prepare GSTR-1, reconcile GSTR-2B, prepare GSTR-3B, generate a challan, and then create document references from the same invoice register.
+Each account has independent business records. Each business has separate monthly invoices, supplier statements, GSTR-1 and GSTR-3B filings, with shared cash/credit ledgers, challans, registration applications and documents. GSTR-2A/2B are read-only statements. Challan creation, cash deposit, tax offset and filing are separate operations. A saved return survives refresh and backend restart when the SQLite file is retained.
 
 ## Stack
 
 - **Frontend:** React 19 + Vite, deployed to Vercel.
 - **Backend:** Express 5 API, deployed to Render.
 - **Storage:** SQLite through `better-sqlite3` (the database is kept in `backend/data/` or the path supplied in `SQLITE_PATH`).
-- **Practice model:** separate student logins, four selectable business cases, and stateful workflows. There is no LMS, assignment authoring, automatic grading, or instructor-review queue in the portal.
+- **Practice model:** two independent demo accounts, five selectable businesses (regular supplies, nil return, ITC review, inter-state dispatch and excess purchases), monthly return state and filing history.
+- **Reference styling:** Verdana, matching the observed live portal. The masthead emblem and industrial banner are local copies of publicly served GST portal assets; their source URLs are listed below.
 
 ## Local development
 
@@ -31,12 +32,16 @@ npm run dev
 
 Open [http://localhost:4173](http://localhost:4173). The frontend defaults to `http://localhost:5050/api`.
 
+Run `npm test` from `backend` for the API integration suite. Tests create their own temporary SQLite database and do not change the local teaching records. Run `npm run build` from `frontend` to verify the production bundle.
+
+See [the local review guide](docs/local-review.md) for suggested browser checks and the boundaries of this review build.
+
 Demo logins:
 
-| Account | Email | Password |
-| --- | --- | --- |
-| Student | `student@demo.com` | `12345` |
-| Instructor | `instructor@demo.com` | `12345` |
+| Account    | Email                 | Password |
+| ---------- | --------------------- | -------- |
+| Student    | `student@demo.com`    | `12345`  |
+| Instructor | `instructor@demo.com` | `12345`  |
 
 ## Deploy the API to Render
 
@@ -62,6 +67,14 @@ VITE_API_BASE=https://gst-practice-lab-api.onrender.com/api
 
 SQLite is deliberately used for this build. On Render, point `SQLITE_PATH` at a persistent disk before using the portal with real students; the default Render filesystem can be replaced on redeploy. Before live use, add account provisioning, password-reset flows, Argon2/bcrypt password hashing, rate limiting, audit logs, backups, and a privacy policy. Validate every instructional workflow against current official GST guidance before teaching it.
 
-## Design boundary
+## Reference snapshot and coverage
 
-The interface is original. It uses general public-service portal conventions—navigation, taxpayer context, ledgers, returns, and document dashboards—without copying government branding, commercial-course content, or protected interface assets.
+Reference date: **24 October 2026**. Public pages were compared against the live GST homepage, registration and login pages. Post-login return structure uses the official user manuals. The Tally account's scenario list was inspected, but its simulator login rejected the supplied password; its internal forms were not used as verified references.
+
+- [GST homepage](https://www.gst.gov.in/)
+- [Registration guide](https://tutorial.gst.gov.in/userguide/registration/Apply_for_Registration_Normal_Taxpayer.htm)
+- [GSTR-3B guide](https://tutorial.gst.gov.in/userguide/returns/Create_and_Submit_GSTR3B.htm)
+- [Banner asset](https://static.gst.gov.in/uiassets/images/banner/banner_image_large.jpg)
+- [Masthead emblem asset](https://static.gst.gov.in/uiassets/images/Emblem_of_India-white.svg)
+
+This is a local review build, not a claim of complete parity with every GST service. The main registration/returns/payment journeys work, while specialized registrations, multi-state registration, QRMP/IFF, IMS, annual returns, refunds and notices are not implemented. Some invoice/registration fields are simplified, JSON import supports the provided invoice template and single-rate B2B utility records, attachment controls retain file metadata only, and verification/signing/bank responses use local dummy values. E-way bill and e-invoice screens implement generation, viewing, printing and cancellation but are not complete replicas of the external portals. Validate these boundaries with the instructor before treating the build as a finished training reference.
