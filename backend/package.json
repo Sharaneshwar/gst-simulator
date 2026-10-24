@@ -2,16 +2,21 @@
   "name": "gst-practice-portal-api",
   "version": "1.0.0",
   "private": true,
-  "description": "SQLite-backed API for a stateful GST practice portal",
+  "description": "Neon PostgreSQL-backed API for a stateful GST practice portal",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "test:neon": "node --require ./test/neon-env.cjs --test --test-concurrency=1 test/access.test.js test/portal.test.js",
+    "db:import-sqlite": "node scripts/import-sqlite.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1",
-    "express": "^5.1.0"
+    "dotenv": "^18.0.9",
+    "express": "^5.1.0",
+    "nodemailer": "^10.2.1",
+    "pg": "^8.23.1"
   },
   "engines": {
     "node": ">=20"

@@ -319,15 +319,50 @@ export function Modal({ title, children, onClose, wide = false }) {
     </dialog>
   );
 }
-export function Signing({ title, onSubmit, onClose }) {
+export function OtpResend({ delivery, onResend }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.max(
+    0,
+    Math.ceil(((delivery?.resendAt || 0) - now) / 1000),
+  );
+  return (
+    <Btn tone="secondary" disabled={seconds > 0} onClick={onResend}>
+      {seconds ? `RESEND OTP IN ${seconds}s` : "RESEND OTP"}
+    </Btn>
+  );
+}
+export function Signing({ title, purpose, onSubmit, onClose }) {
+  const { active, w, user, mutate } = usePortal();
+  const recipient =
+    w.registration.tabs.signatory?.email ||
+    w.registration.partA.email ||
+    (user.email.endsWith("@demo.com") ? "" : user.email);
   const [form, setForm] = useState({
     declaration: false,
     signatory: "",
     method: "EVC",
+    email: recipient,
     otp: "",
+    challengeId: "",
   });
-  const [sent, setSent] = useState(false);
-  const { active } = usePortal();
+  const [delivery, setDelivery] = useState(null);
+  const signatoryName =
+    purpose === "registration-submit"
+      ? w.registration.tabs.signatory?.name || w.registration.partA.legalName
+      : active.state.taxpayer.legalName;
+  const send = async () => {
+    const result = await mutate("signing/send", { purpose, ...form });
+    setDelivery(result.otp);
+    setForm((old) => ({
+      ...old,
+      challengeId: result.otp.challengeId,
+      otp: "",
+    }));
+  };
   return (
     <Modal title={title} onClose={onClose}>
       <label className="check-line">
@@ -342,43 +377,56 @@ export function Signing({ title, onSubmit, onClose }) {
       <Select
         label="Authorized Signatory"
         required
+        disabled={Boolean(delivery)}
         value={form.signatory}
         onChange={(e) => setForm({ ...form, signatory: e.target.value })}
-        options={[active.state.taxpayer.legalName]}
+        options={[signatoryName]}
       />
       <Select
         label="Filing method"
+        disabled={Boolean(delivery)}
         value={form.method}
         onChange={(e) => setForm({ ...form, method: e.target.value })}
         options={["EVC", "DSC"]}
       />
-      {!sent ? (
+      <Input
+        label="Email Address for OTP"
+        type="email"
+        required
+        disabled={Boolean(delivery)}
+        value={form.email}
+        onChange={(e) => setForm({ ...form, email: e.target.value })}
+        help="The verification code will be sent to this email address."
+      />
+      {!delivery ? (
         <Btn
-          disabled={!form.declaration || !form.signatory}
-          onClick={() => setSent(true)}
+          disabled={!form.declaration || !form.signatory || !form.email}
+          onClick={send}
         >
-          {form.method === "EVC" ? "SEND OTP" : "SELECT CERTIFICATE"}
+          SEND OTP
         </Btn>
       ) : (
         <>
           <p className="info">
-            {form.method === "EVC"
-              ? "Verification OTP"
-              : "Certificate verification code"}
-            : <b>123456</b>
+            An OTP was emailed to <b>{delivery.recipient}</b>. It expires in 10
+            minutes and can be used once.
           </p>
           <Input
             label="Verification code"
             required
+            inputMode="numeric"
+            autoComplete="one-time-code"
             value={form.otp}
             onChange={(e) => setForm({ ...form, otp: e.target.value })}
             maxLength={6}
           />
+          <OtpResend delivery={delivery} onResend={send} />
           <div className="actions">
             <Btn tone="secondary" onClick={onClose}>
               CANCEL
             </Btn>
             <Btn
+              disabled={!form.declaration || form.otp.length !== 6}
               onClick={async () => {
                 await onSubmit(form);
                 onClose();

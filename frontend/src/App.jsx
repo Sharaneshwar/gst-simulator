@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { PortalContext, Btn, Crumbs, Panel, Table } from "./lib";
+import { PortalContext, Panel } from "./lib";
 import {
   Home,
   Login,
@@ -21,6 +21,7 @@ import {
 } from "./returns";
 import { Registration, TrackApplication } from "./registration";
 import { Documents } from "./documents";
+import { MyProfile, UserAccess } from "./access-pages";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:5050/api";
 const publicRoutes = [
@@ -182,9 +183,16 @@ function Shell({ children, ctx }) {
                     <b>{active?.state.taxpayer.legalName}</b>
                     <span>{user.email}</span>
                     <button onClick={() => go("profile")}>My Profile</button>
-                    <button onClick={() => go("business")}>
-                      Switch Business
-                    </button>
+                    {user.role === "instructor" && (
+                      <>
+                        <button onClick={() => go("access")}>
+                          User Access
+                        </button>
+                        <button onClick={() => go("business")}>
+                          Switch Business
+                        </button>
+                      </>
+                    )}
                     <button onClick={logout}>Logout</button>
                   </div>
                 )}
@@ -275,9 +283,14 @@ function Shell({ children, ctx }) {
               {user ? (
                 <>
                   <button onClick={() => go("profile")}>My Profile</button>
-                  <button onClick={() => go("business")}>
-                    Switch Business
-                  </button>
+                  {user.role === "instructor" && (
+                    <>
+                      <button onClick={() => go("access")}>User Access</button>
+                      <button onClick={() => go("business")}>
+                        Switch Business
+                      </button>
+                    </>
+                  )}
                   <button onClick={logout}>Logout</button>
                 </>
               ) : (
@@ -365,8 +378,18 @@ export default function App() {
     const data = await res
       .json()
       .catch(() => ({ message: "The server returned an invalid response." }));
-    if (!res.ok)
+    if (!res.ok) {
+      if (
+        authToken &&
+        ["ACCOUNT_DISABLED", "SESSION_REVOKED"].includes(data.code)
+      ) {
+        localStorage.removeItem("gstPortalToken");
+        setToken("");
+        setPortal(null);
+        window.location.hash = "/login";
+      }
       throw new Error(data.message || "Unable to complete the request.");
+    }
     return data;
   }
   async function load(authToken = token) {
@@ -417,6 +440,12 @@ export default function App() {
     return () => {
       alive = false;
     };
+  }, [token]);
+  useEffect(() => {
+    if (!token) return;
+    // Idle pages discover access revocation within a minute; every API request checks it immediately.
+    const timer = setInterval(() => api("/auth/me").catch(() => {}), 60000);
+    return () => clearInterval(timer);
   }, [token]);
   useEffect(() => {
     if (error || notice)
@@ -489,7 +518,9 @@ export default function App() {
   else if (parts[0] === "registration") content = <Registration />;
   else if (parts[0] === "track") content = <TrackApplication />;
   else if (parts[0] === "dashboard") content = <Dashboard />;
-  else if (parts[0] === "business") content = <Cases />;
+  else if (parts[0] === "business")
+    content = user.role === "instructor" ? <Cases /> : <MyProfile />;
+  else if (parts[0] === "access") content = <UserAccess />;
   else if (parts[0] === "returns") content = <ReturnsDashboard />;
   else if (parts[0] === "gstr1")
     content = parts[1] ? (
@@ -508,25 +539,7 @@ export default function App() {
     content = <SearchTaxpayer byPan={parts[1] === "pan"} />;
   else if (parts[0] === "eway" || parts[0] === "einvoice")
     content = <Documents key={parts[0]} kind={parts[0]} />;
-  else if (parts[0] === "profile")
-    content = (
-      <div className="container">
-        <Crumbs items={["My Profile"]} />
-        <Panel title="My Profile">
-          <Table columns={["Particulars", "Details"]}>
-            {Object.entries(active.state.taxpayer).map(([key, value]) => (
-              <tr key={key}>
-                <td className="capitalize">{key.replace(/([A-Z])/g, " $1")}</td>
-                <td>{value}</td>
-              </tr>
-            ))}
-          </Table>
-          <div className="actions">
-            <Btn onClick={() => go("business")}>SWITCH BUSINESS</Btn>
-          </div>
-        </Panel>
-      </div>
-    );
+  else if (parts[0] === "profile") content = <MyProfile />;
   else content = <InfoPage page={parts[0]} />;
   return (
     <PortalContext.Provider value={ctx}>

@@ -1,0 +1,141 @@
+.access-page {
+  padding-bottom: 32px;
+}
+.access-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 20px;
+  margin: 20px 0;
+  flex-wrap: wrap;
+}
+.access-toolbar .tabs {
+  margin: 0;
+}
+.access-toolbar .field {
+  min-width: 240px;
+  margin: 0;
+}
+.access-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.access-muted {
+  display: block;
+  color: #586777;
+  margin-top: 6px;
+}
+.access-badge {
+  display: block;
+  width: fit-content;
+  padding: 4px 8px;
+  margin-top: 6px;
+  border-radius: 3px;
+  color: #4e430f;
+  background: #fff5d6;
+  font-size: 12px;
+}
+.access-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: transparent;
+  color: #505b65;
+  border: 1px solid #a2acb5;
+  border-radius: 4px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.access-switch > span {
+  display: inline-block;
+  width: 30px;
+  height: 18px;
+  border-radius: 12px;
+  background: #788590;
+  position: relative;
+}
+.access-switch > span::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: white;
+  top: 3px;
+  left: 3px;
+}
+.access-switch.is-active {
+  color: #14612d;
+  border-color: #78a789;
+}
+.access-switch.is-active > span {
+  background: #23793e;
+}
+.access-switch.is-active > span::after {
+  left: 15px;
+}
+.access-switch:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+.access-review {
+  margin-top: 24px;
+  padding: 18px;
+  background: #f3f6f9;
+  border-left: 3px solid #24558a;
+  overflow-wrap: anywhere;
+}
+.access-profile-form {
+  max-width: 540px;
+  margin-top: 20px;
+  display: flex;
+  gap: 12px;
+  align-items: end;
+  flex-wrap: wrap;
+}
+.access-profile-form .field {
+  flex: 1 1 100%;
+}
+.access-declaration {
+  display: flex;
+  align-items: start;
+  gap: 10px;
+  margin: 20px 0;
+}
+.access-declaration input {
+  width: auto;
+  margin-top: 3px;
+}
+.login-access-message {
+  margin: -8px 0 18px;
+  min-height: 20px;
+  font-size: 13px;
+  color: #506176;
+}
+.login-access-message.denied,
+.login-access-message.error {
+  color: #b42318;
+}
+.login-page input:disabled {
+  background: #f0f2f5;
+  color: #687481;
+  cursor: not-allowed;
+}
+.login-page input[aria-invalid="true"] {
+  border-color: #b42318;
+}
+@media (max-width: 600px) {
+  .access-toolbar {
+    align-items: stretch;
+  }
+  .access-toolbar .field {
+    width: 100%;
+  }
+  .access-page .dashboard-title {
+    align-items: start;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+}

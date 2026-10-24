@@ -187,10 +187,47 @@ export function Home() {
 }
 
 export function Login() {
-  const { login, setError, go, user } = usePortal();
-  const [email, setEmail] = useState("student@demo.com");
-  const [password, setPassword] = useState("12345");
+  const { login, api, setError, go, user } = usePortal();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [access, setAccess] = useState({ email: "", status: "idle" });
+  const [retry, setRetry] = useState(0);
+  const normalizedEmail = email.trim().toLowerCase();
+  const permitted =
+    access.email === normalizedEmail && access.status === "allowed";
+  useEffect(() => {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      setAccess({ email: normalizedEmail, status: "idle" });
+      return;
+    }
+    let current = true;
+    setAccess({ email: normalizedEmail, status: "checking" });
+    const timer = setTimeout(
+      () =>
+        api("/auth/access-check", { email: normalizedEmail }, "")
+          .then((result) => {
+            if (current)
+              setAccess({
+                email: normalizedEmail,
+                status: result.allowed ? "allowed" : "denied",
+              });
+          })
+          .catch((error) => {
+            if (current)
+              setAccess({
+                email: normalizedEmail,
+                status: "error",
+                message: error.message,
+              });
+          }),
+      400,
+    );
+    return () => {
+      current = false;
+      clearTimeout(timer);
+    };
+  }, [normalizedEmail, retry]);
   return (
     <div className="container">
       <Crumbs items={["Login"]} />
@@ -199,6 +236,7 @@ export function Login() {
           className="narrow-form"
           onSubmit={async (e) => {
             e.preventDefault();
+            if (!permitted || busy) return;
             setBusy(true);
             setError("");
             try {
@@ -227,23 +265,57 @@ export function Login() {
             </p>
           )}
           <Input
-            label="Username"
+            label="Email"
             required
+            type="email"
             value={email}
             autoComplete="username"
-            placeholder="Enter Username"
-            onChange={(e) => setEmail(e.target.value)}
+            placeholder="Enter your invited email"
+            aria-invalid={
+              access.email === normalizedEmail && access.status === "denied"
+            }
+            aria-describedby="login-access-status"
+            onChange={(e) => {
+              setEmail(e.target.value);
+              setPassword("");
+              setAccess({ email: "", status: "idle" });
+            }}
           />
+          <div
+            id="login-access-status"
+            className={`login-access-message ${access.email === normalizedEmail ? access.status : "idle"}`}
+            aria-live="polite"
+          >
+            {access.email === normalizedEmail &&
+              access.status === "checking" &&
+              "Checking access…"}
+            {access.email === normalizedEmail &&
+              access.status === "denied" &&
+              "This email is incorrect or does not have access to the application."}
+            {access.email === normalizedEmail && access.status === "error" && (
+              <>
+                {access.message}{" "}
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => setRetry((value) => value + 1)}
+                >
+                  Retry
+                </button>
+              </>
+            )}
+          </div>
           <Input
             label="Password"
             required
             type="password"
+            disabled={!permitted || busy}
             value={password}
             autoComplete="current-password"
             placeholder="Enter Password"
             onChange={(e) => setPassword(e.target.value)}
           />
-          <Btn type="submit" disabled={busy}>
+          <Btn type="submit" disabled={busy || !permitted || !password}>
             {busy ? "LOGGING IN…" : "LOGIN"}
           </Btn>
           <div className="login-recovery">
@@ -255,21 +327,9 @@ export function Login() {
             </button>
           </div>
           <p>
-            ⓘ <b>First time login:</b> Use your portal credentials to log in.
+            ⓘ <b>First time login:</b> Use the password sent in your invitation
+            email. Contact your instructor if you need access.
           </p>
-          <div className="demo-access">
-            <b>Available accounts</b>
-            <button type="button" onClick={() => setEmail("student@demo.com")}>
-              student@demo.com
-            </button>
-            <button
-              type="button"
-              onClick={() => setEmail("instructor@demo.com")}
-            >
-              instructor@demo.com
-            </button>
-            <small>Password: 12345</small>
-          </div>
         </form>
       </section>
     </div>
@@ -317,9 +377,11 @@ export function Dashboard() {
             <dt>Return Filing Frequency</dt>
             <dd>{active.state.taxpayer.filingFrequency}</dd>
           </dl>
-          <button className="link" onClick={() => go("business")}>
-            Switch Business ▸
-          </button>
+          {user.role === "instructor" && (
+            <button className="link" onClick={() => go("business")}>
+              Switch Business ▸
+            </button>
+          )}
         </Panel>
         <Panel title="Electronic Ledgers">
           <Table columns={["Ledger", "Available balance (₹)"]}>
@@ -592,7 +654,7 @@ export function InfoPage({ page }) {
               ],
               [
                 "Login details",
-                "Use student@demo.com or instructor@demo.com with password 12345. Both accounts have independent records.",
+                "Access is by invitation only. Use your invited email and password. Contact your instructor for a new invitation or help with access.",
                 "login",
               ],
             ].map(([title, text, path]) => (

@@ -3,6 +3,7 @@ import {
   Btn,
   Crumbs,
   Input,
+  OtpResend,
   Panel,
   REG_TABS,
   STATES,
@@ -176,6 +177,8 @@ export function Registration() {
       return;
     }
     await mutate("registration/start", { partA: a });
+    setMobileOtp("");
+    setEmailOtp("");
   };
   function selectTab(key) {
     setTab(key);
@@ -353,6 +356,7 @@ export function Registration() {
         {signing && (
           <Signing
             title="Submit Registration Application"
+            purpose="registration-submit"
             onClose={() => setSigning(false)}
             onSubmit={(form) => mutate("registration/submit", form)}
           />
@@ -422,13 +426,18 @@ export function Registration() {
           {r?.stage === "otp" && kind === "new" ? (
             <>
               <p className="info">
-                Mobile OTP: <b>123456</b> · Email OTP: <b>654321</b>
+                One OTP was emailed to{" "}
+                <b>{r.otp?.recipient || r.partA.email}</b>. Enter that same code
+                in both the Mobile OTP and Email OTP fields. The code expires in
+                10 minutes.
               </p>
               <Input
                 label="Mobile OTP"
                 required
                 value={mobileOtp}
                 maxLength={6}
+                inputMode="numeric"
+                autoComplete="one-time-code"
                 onChange={(e) => setMobileOtp(e.target.value)}
               />
               <Input
@@ -436,11 +445,10 @@ export function Registration() {
                 required
                 value={emailOtp}
                 maxLength={6}
+                inputMode="numeric"
                 onChange={(e) => setEmailOtp(e.target.value)}
               />
-              <button className="link" onClick={start}>
-                Click here to resend the OTP
-              </button>
+              <OtpResend delivery={r.otp} onResend={start} />
               <div className="actions">
                 <Btn
                   onClick={async () => {
@@ -478,14 +486,28 @@ export function Registration() {
           ) : resumeOtp !== null ? (
             <>
               <p className="info">
-                Mobile / Email OTP: <b>123456</b>
+                An OTP was emailed to{" "}
+                <b>{r.resumeOtp?.recipient || r.partA.email}</b>. Enter the code
+                from that email to continue. It expires in 10 minutes.
               </p>
               <Input
                 label="Mobile / Email OTP"
                 required
                 maxLength={6}
+                inputMode="numeric"
+                autoComplete="one-time-code"
                 value={resumeOtp}
                 onChange={(e) => setResumeOtp(e.target.value)}
+              />
+              <OtpResend
+                delivery={r.resumeOtp}
+                onResend={async () => {
+                  await mutate("registration/resume", {
+                    trn: trn || r.trn,
+                    email: email || r.partA.email,
+                  });
+                  setResumeOtp("");
+                }}
               />
               <div className="actions">
                 <Btn
@@ -621,7 +643,7 @@ export function Registration() {
                     value={a.mobile || ""}
                     placeholder="Enter Mobile Number"
                     maxLength={10}
-                    help="ⓘ Separate OTP will be sent to this mobile number"
+                    help="ⓘ Use the same code delivered by email for Mobile OTP."
                     onChange={(e) => updateA("mobile", e.target.value)}
                   />
                   <div className="actions">

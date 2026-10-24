@@ -1,3 +1,4 @@
 data/
 .env
 npm-debug.log*
+.env.neon-test

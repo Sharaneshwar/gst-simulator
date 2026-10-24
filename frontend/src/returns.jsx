@@ -263,6 +263,7 @@ export function Gstr1() {
       {signing && (
         <Signing
           title="File GSTR-1"
+          purpose="gstr1-file"
           onClose={() => setSigning(false)}
           onSubmit={(form) => mutate("gstr1/file", { ...form, nil })}
         />
@@ -1215,6 +1216,7 @@ export function Gstr3b() {
       {signing && (
         <Signing
           title="File GSTR-3B"
+          purpose="gstr3b-file"
           onClose={() => setSigning(false)}
           onSubmit={(form) => mutate("gstr3b/file", form)}
         />

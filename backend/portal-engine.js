@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { normalizeEmail } = require("./otp-service");
 const HEADS = ["igst", "cgst", "sgst", "cess"];
 const SECTIONS = [
   "B2B",
@@ -374,11 +375,37 @@ function viewState(state, label) {
   return state;
 }
 function mountPortal(app, deps) {
-  const { activeFor, saveState, requireAuth, getActiveCase } = deps;
+  const { activeFor, saveState, requireAuth, getActiveCase, getOtpService } =
+    deps;
+  const otpScope = (ctx, w, purpose) =>
+    `${ctx.user.id}:${ctx.active.slug}:${purpose}${purpose.startsWith("gstr") ? ":" + w.period : ""}`;
+  const signingBinding = (purpose, body, w, p) => ({
+    purpose,
+    email: normalizeEmail(body.email),
+    signatory: String(body.signatory || ""),
+    method: body.method,
+    data:
+      purpose === "gstr1-file"
+        ? { revision: p.gstr1.revision, summary: p.gstr1.summary }
+        : purpose === "gstr3b-file"
+          ? { offset: p.gstr3b.offset, tables: p.gstr3b.tables }
+          : { partA: w.registration.partA, tabs: w.registration.tabs },
+  });
+  const signingCheck = async (body, purpose, w, p, ctx) => {
+    if (!body.declaration || !body.signatory)
+      fail("Select the declaration and authorised signatory.");
+    if (!["EVC", "DSC"].includes(body.method)) fail("Select a signing method.");
+    await getOtpService().consume({
+      challengeId: body.challengeId,
+      scope: otpScope(ctx, w, purpose),
+      code: body.otp,
+      binding: signingBinding(purpose, body, w, p),
+    });
+  };
   const route = (path, handler) =>
-    app.post(`/api/workspace/${path}`, (req, res, next) => {
+    app.post(`/api/workspace/${path}`, async (req, res, next) => {
       try {
-        const ctx = activeFor(req, res);
+        const ctx = await activeFor(req, res);
         if (!ctx) return;
         const w = ensureWorkspace(ctx.active.state, ctx.active.period);
         if (req.body?.period) {
@@ -386,8 +413,13 @@ function mountPortal(app, deps) {
           w.period = req.body.period;
         }
         const p = getPeriod(w);
-        const result = handler(req.body || {}, w, p, ctx) || {};
-        saveState(ctx.user.id, ctx.active.slug, ctx.active.state);
+        const result = (await handler(req.body || {}, w, p, ctx)) || {};
+        await saveState(
+          ctx.user.id,
+          ctx.active.slug,
+          ctx.active.state,
+          ctx.active.revision,
+        );
         res.json({
           ...result,
           state: viewState(ctx.active.state, ctx.active.period),
@@ -399,6 +431,37 @@ function mountPortal(app, deps) {
       }
     });
   route("period", () => ({ message: "Return period selected." }));
+  route("signing/send", async (body, w, p, ctx) => {
+    const purpose = body.purpose;
+    if (!["gstr1-file", "gstr3b-file", "registration-submit"].includes(purpose))
+      fail("Select a valid verification purpose.");
+    if (!body.signatory || !["EVC", "DSC"].includes(body.method))
+      fail("Select the authorised signatory and filing method first.");
+    if (
+      purpose === "gstr1-file" &&
+      (p.gstr1.status !== "Ready to File" ||
+        p.gstr1.summaryRevision !== p.gstr1.revision)
+    )
+      fail("Generate the latest GSTR-1 summary before requesting an OTP.");
+    if (purpose === "gstr3b-file" && p.gstr3b.status !== "Offset")
+      fail("Offset the liability before requesting a filing OTP.");
+    if (
+      purpose === "registration-submit" &&
+      (w.registration.stage !== "draft" ||
+        REG_TABS.some((tab) => !w.registration.savedTabs.includes(tab)))
+    )
+      fail(
+        "Complete the registration application before requesting a submission OTP.",
+      );
+    const otp = await getOtpService().issue({
+      scope: otpScope(ctx, w, purpose),
+      userId: ctx.user.id,
+      email: body.email,
+      purpose,
+      binding: signingBinding(purpose, body, w, p),
+    });
+    return { otp, message: `OTP sent to ${otp.recipient}.` };
+  });
   route("invoice/save", (body, w, p, ctx) => {
     if (p.gstr1.status === "Filed")
       fail("This return is filed. Select a later period to amend a document.");
@@ -461,7 +524,7 @@ function mountPortal(app, deps) {
     p.gstr1.status = "Ready to File";
     return { message: "Summary generated successfully." };
   });
-  route("gstr1/file", (body, w, p) => {
+  route("gstr1/file", async (body, w, p, ctx) => {
     if (p.gstr1.status === "Filed") fail("This return has already been filed.");
     if (w.period > w.initialPeriod) {
       const previousDate = new Date(`${w.period}-01T00:00:00Z`);
@@ -479,7 +542,7 @@ function mountPortal(app, deps) {
       p.invoices.some((i) => Number(i.taxable) > 0 || i.issued > 0)
     )
       fail("A nil return cannot contain outward supply records.");
-    verifySigning(body);
+    await signingCheck(body, "gstr1-file", w, p, ctx);
     p.gstr1 = {
       ...p.gstr1,
       status: "Filed",
@@ -598,10 +661,10 @@ function mountPortal(app, deps) {
     });
     return { message: "Liability offset successfully. Proceed to filing." };
   });
-  route("gstr3b/file", (body, w, p) => {
+  route("gstr3b/file", async (body, w, p, ctx) => {
     if (p.gstr3b.status !== "Offset")
       fail("Offset the liability before filing GSTR-3B.");
-    verifySigning(body);
+    await signingCheck(body, "gstr3b-file", w, p, ctx);
     p.gstr3b.status = "Filed";
     p.gstr3b.arn = `AA${crypto.randomInt(1000000000000, 9999999999999)}`;
     p.gstr3b.filedAt = stamp();
@@ -757,7 +820,7 @@ function mountPortal(app, deps) {
       message: `${accepted.length} records processed; ${errors.length} errors.`,
     };
   });
-  route("registration/start", (body, w) => {
+  route("registration/start", async (body, w, p, ctx) => {
     if (["Pending for Validation", "Approved"].includes(w.registration.stage))
       fail("This application has already been submitted.");
     const a = body.partA || {};
@@ -774,39 +837,62 @@ function mountPortal(app, deps) {
     if (!/^[A-Z]{5}\d{4}[A-Z]$/.test(a.pan)) fail("Enter a valid PAN.");
     if (!/^\S+@\S+\.\S+$/.test(a.email) || !/^[6-9]\d{9}$/.test(a.mobile))
       fail("Enter a valid email address and mobile number.");
+    a.email = normalizeEmail(a.email);
+    const otp = await getOtpService().issue({
+      scope: otpScope(ctx, w, "registration-start"),
+      userId: ctx.user.id,
+      email: a.email,
+      purpose: "registration-start",
+      binding: a,
+    });
     w.registration.partA = a;
     w.registration.createdAt ||= stamp();
     w.registration.stage = "otp";
-    w.registration.otpExpires = Date.now() + 10 * 60 * 1000;
-    return { message: "OTP generated. Mobile OTP: 123456 · Email OTP: 654321" };
+    w.registration.otp = otp;
+    delete w.registration.otpExpires;
+    return {
+      otp,
+      message: `One OTP email sent to ${otp.recipient}. Use the same code in both OTP fields.`,
+    };
   });
-  route("registration/verify", (body, w) => {
+  route("registration/verify", async (body, w, p, ctx) => {
     const r = w.registration;
     if (r.stage !== "otp") fail("Complete Part A first.");
-    if (Date.now() > r.otpExpires) fail("OTP expired. Request a new OTP.");
-    if (body.mobileOtp !== "123456" || body.emailOtp !== "654321")
-      fail("The OTP entered is incorrect.");
+    await getOtpService().consume({
+      challengeId: body.challengeId || r.otp?.challengeId,
+      scope: otpScope(ctx, w, "registration-start"),
+      code: body.mobileOtp === body.emailOtp ? body.emailOtp : "",
+      binding: r.partA,
+    });
+    r.verifiedEmail = r.partA.email;
     r.trn ||= digits(15);
     r.stage = "trn";
     return { message: `Temporary Reference Number: ${r.trn}` };
   });
-  route("registration/resume", (body, w) => {
+  route("registration/resume", async (body, w, p, ctx) => {
     if (
       !w.registration.trn ||
       body.trn !== w.registration.trn ||
-      body.email !== w.registration.partA.email
+      normalizeEmail(body.email) !== w.registration.partA.email
     )
       fail("TRN or email address is incorrect.");
-    w.registration.resumeExpires = Date.now() + 600000;
-    return { message: "OTP generated: 123456" };
+    const otp = await getOtpService().issue({
+      scope: otpScope(ctx, w, "registration-resume"),
+      userId: ctx.user.id,
+      email: w.registration.partA.email,
+      purpose: "registration-resume",
+      binding: { trn: w.registration.trn, email: w.registration.partA.email },
+    });
+    w.registration.resumeOtp = otp;
+    return { otp, message: `OTP sent to ${otp.recipient}.` };
   });
-  route("registration/resume-verify", (body, w) => {
-    if (
-      !w.registration.resumeExpires ||
-      Date.now() > w.registration.resumeExpires ||
-      body.otp !== "123456"
-    )
-      fail("Invalid or expired OTP.");
+  route("registration/resume-verify", async (body, w, p, ctx) => {
+    await getOtpService().consume({
+      challengeId: body.challengeId || w.registration.resumeOtp?.challengeId,
+      scope: otpScope(ctx, w, "registration-resume"),
+      code: body.otp,
+      binding: { trn: w.registration.trn, email: w.registration.partA.email },
+    });
     if (w.registration.stage !== "Pending for Validation")
       w.registration.stage = "draft";
     return { message: "Application opened." };
@@ -835,13 +921,13 @@ function mountPortal(app, deps) {
     r.stage = "draft";
     return { message: "Details saved successfully." };
   });
-  route("registration/submit", (body, w) => {
+  route("registration/submit", async (body, w, p, ctx) => {
     const r = w.registration;
     if (r.stage === "Pending for Validation")
       fail("Application already submitted.");
     if (REG_TABS.some((tab) => !r.savedTabs.includes(tab)))
       fail("Save all registration tabs before submitting.");
-    verifySigning(body);
+    await signingCheck(body, "registration-submit", w, p, ctx);
     r.stage = "Pending for Validation";
     r.arn = `AA${crypto.randomInt(1000000000000, 9999999999999)}`;
     r.submittedAt = stamp();
@@ -918,10 +1004,10 @@ function mountPortal(app, deps) {
     } else fail("Unknown document action.");
     return { message: "Document updated." };
   });
-  app.get("/api/workspace/export", (req, res) => {
-    const user = requireAuth(req, res);
+  app.get("/api/workspace/export", async (req, res) => {
+    const user = await requireAuth(req, res);
     if (!user) return;
-    const active = getActiveCase(user.id);
+    const active = await getActiveCase(user.id);
     const w = ensureWorkspace(active.state, active.period);
     const p = getPeriod(w);
     res.json({
@@ -932,13 +1018,6 @@ function mountPortal(app, deps) {
       gstr3b: p.gstr3b,
     });
   });
-}
-function verifySigning(body) {
-  if (!body.declaration || !body.signatory)
-    fail("Select the declaration and authorised signatory.");
-  if (!["EVC", "DSC"].includes(body.method)) fail("Select a signing method.");
-  if (body.otp !== "123456")
-    fail("Verification code is incorrect. Use 123456.");
 }
 module.exports = {
   mountPortal,

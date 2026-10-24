@@ -5,3 +5,11 @@ frontend/.env
 frontend/.env.local
 .vite/
 backend/data/
+backend/.env
+backend/.env.*
+!backend/.env.example
+/.env
+/.env.local
+/.env.*.local
+/node_modules/
+.neon

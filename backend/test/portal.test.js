@@ -5,8 +5,23 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const taskDir = fs.mkdtempSync(path.join(os.tmpdir(), "gst-portal-test-"));
-process.env.SQLITE_PATH = path.join(taskDir, "test.sqlite");
-const { app, db } = require("../server");
+process.env.GST_ENABLE_CASE_LIBRARY = "1";
+if (!process.env.GST_TEST_POSTGRES)
+  process.env.SQLITE_PATH = path.join(taskDir, "test.sqlite");
+const { app, db, ready } = require("../server");
+const { createOtpService } = require("../otp-service");
+const delivered = [];
+let otpTime = Date.now();
+async function configureTestOtp() {
+  app.locals.otpService = await createOtpService({
+    db,
+    secret: "isolated-test-key",
+    now: () => otpTime,
+    sendEmail: async (email) => {
+      delivered.push(email);
+    },
+  });
+}
 const {
   allocation,
   paymentPlan,
@@ -23,10 +38,33 @@ async function request(route, body, auth = token) {
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  return { code: response.status, ...(await response.json()) };
+  // Keep the HTTP status separate from machine-readable authentication error codes.
+  return { ...(await response.json()), code: response.status };
 }
-const action = (route, body = {}, auth) =>
-  request("/workspace/" + route, body, auth);
+async function action(route, body = {}, auth) {
+  const purpose = {
+    "gstr1/file": "gstr1-file",
+    "gstr3b/file": "gstr3b-file",
+    "registration/submit": "registration-submit",
+  }[route];
+  if (purpose && body.declaration && !body.challengeId) {
+    otpTime += 60 * 60 * 1000;
+    const email = "verification@example.com";
+    const sent = await request(
+      "/workspace/signing/send",
+      { purpose, signatory: body.signatory, method: body.method, email },
+      auth,
+    );
+    if (sent.code === 200)
+      body = {
+        ...body,
+        email,
+        challengeId: sent.otp.challengeId,
+        otp: body.otp === "123456" ? delivered.at(-1).code : body.otp,
+      };
+  }
+  return request("/workspace/" + route, body, auth);
+}
 const sign = {
   declaration: true,
   signatory: "Student",
@@ -43,10 +81,14 @@ const invoice = {
   rate: 18,
 };
 async function reset(slug = "regular-october") {
+  // Alternate fixture businesses belong to the instructor; students have one fixed business.
+  if (slug !== "regular-october") token = instructorToken;
   await request(`/portal/cases/${slug}/activate`, {});
   return request("/portal/reset", {});
 }
 before(async () => {
+  await ready;
+  await configureTestOtp();
   server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   url = `http://127.0.0.1:${server.address().port}`;
@@ -67,7 +109,7 @@ before(async () => {
 });
 after(async () => {
   await new Promise((resolve) => server.close(resolve));
-  db.close();
+  await db.close();
   fs.rmSync(taskDir, { recursive: true });
 });
 
@@ -265,18 +307,19 @@ test("registration verifies both OTPs, resumes TRN and requires all tabs", async
     mobile: "9876543210",
   };
   assert.equal((await action("registration/start", { partA })).code, 200);
+  const sharedOtp = delivered.at(-1).code;
   assert.equal(
     (
       await action("registration/verify", {
         mobileOtp: "bad",
-        emailOtp: "654321",
+        emailOtp: sharedOtp,
       })
     ).code,
     400,
   );
   const verified = await action("registration/verify", {
-    mobileOtp: "123456",
-    emailOtp: "654321",
+    mobileOtp: sharedOtp,
+    emailOtp: sharedOtp,
   });
   const trn = verified.state.workspace.registration.trn;
   assert.ok(trn);
@@ -285,7 +328,8 @@ test("registration verifies both OTPs, resumes TRN and requires all tabs", async
     200,
   );
   assert.equal(
-    (await action("registration/resume-verify", { otp: "123456" })).code,
+    (await action("registration/resume-verify", { otp: delivered.at(-1).code }))
+      .code,
     200,
   );
   assert.equal((await action("registration/submit", sign)).code, 400);
