@@ -26,3 +26,11 @@ The requested public email access check intentionally reveals whether an email c
 Run `npm test` from `backend` and `npm run build` from `frontend`. Access tests create temporary SQLite databases and mock email delivery. They cover permissions, both invitation roles, duplicate dummy GSTINs, expiry/revocation/resending, failed delivery, access/session revocation, account-owned business workspaces, core-field approval and startup persistence.
 
 No migration deletes old practice-case data. Existing student accounts retain their previously active business. New registrations add private workspaces. See [registration-practice.md](registration-practice.md) for application history and input defaults.
+
+## Password changes, resets and viewing
+
+Every signed-in user can change their password from **My Profile → Change Password**, using their current password and a matching new password of 8–128 characters. The current browser receives a replacement session; other sessions must sign in again. Instructors can reset onboarded students from **User Access → View → Reset Student Password**. Resetting does not send email, reactivate disabled accounts, alter invitations or remove practice work. Pending invitations use **Resend**, which replaces the invitation password.
+
+Instructors can reveal their own password and student passwords through **Show Password** in account details. Other instructor passwords cannot be revealed. Responses use `Cache-Control: no-store`; each successful reveal is audited. Passwords stay hidden by default and clear when the dialog closes or after 60 seconds. Public user/login/list responses never include passwords, password hashes or encrypted values.
+
+Login verification continues to use scrypt hashes. A separate AES-256-GCM encrypted copy supports the explicitly requested instructor viewing feature. Its key is derived from the persistent server `TOKEN_SECRET`; ciphertext is authenticated against the target user ID. Keep that secret stable. Older hash-only accounts become viewable after a successful login, a profile password change or an instructor reset. No existing password is recovered or reset during deployment. A successful login also repairs an encrypted copy after a key rotation. The encrypted password is never used to authenticate a login.

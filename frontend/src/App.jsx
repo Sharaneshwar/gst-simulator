@@ -420,6 +420,7 @@ export default function App() {
         if (data.code === "NETWORK_ACCESS_REQUIRED") window.location.reload();
         if (
           authToken &&
+          authToken === localStorage.getItem("gstPortalToken") &&
           ["ACCOUNT_DISABLED", "SESSION_REVOKED"].includes(data.code)
         ) {
           localStorage.removeItem("gstPortalToken");
@@ -509,6 +510,10 @@ export default function App() {
       : route;
     window.location.hash = "/" + destination;
   }
+  function acceptSession(value) {
+    localStorage.setItem("gstPortalToken", value);
+    setToken(value);
+  }
   function logout() {
     setIntended("dashboard");
     localStorage.removeItem("gstPortalToken");
@@ -550,6 +555,7 @@ export default function App() {
     load,
     go,
     login,
+    acceptSession,
     logout,
     mutate,
     selectCase,

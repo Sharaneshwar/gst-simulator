@@ -353,6 +353,9 @@ export function SupplierStatement({ type }) {
               ["Taxable Value", money(selected.taxable)],
               ["Rate", `${selected.rate || 0}%`],
               ["ITC Status", selected.match],
+              ...(selected.itcReason
+                ? [["ITC availability reason", selected.itcReason]]
+                : []),
               ["Reported On", dateLabel(selected.reportedOn || selected.date)],
             ].map(([k, v]) => (
               <div key={k}>
@@ -534,7 +537,10 @@ export function PurchaseData() {
               <td>{i.number}</td>
               <td>{i.documentType || "Invoice"}</td>
               <td>{money(i.taxable)}</td>
-              <td>{i.includedIn2b === false ? "Excluded" : "Included"}</td>
+              <td>
+                {i.includedIn2b === false ? "Excluded" : "Included"} · {i.match}
+                {i.itcReason && <small>{i.itcReason}</small>}
+              </td>
               <td>
                 <button
                   className="link"

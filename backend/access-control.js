@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { sealPassword, openPassword } = require("./password-vault");
 const INVITE_LIFETIME = 48 * 60 * 60 * 1000;
 const ACCESS_MESSAGE =
   "This email is incorrect or does not have access to the application.";
@@ -82,7 +83,7 @@ async function initializeAccess(db) {
       await db
         .prepare(
           db.dialect === "postgres"
-            ? "SELECT column_name AS name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users'"
+            ? "SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'users'"
             : "PRAGMA table_info(users)",
         )
         .all()
@@ -99,6 +100,7 @@ async function initializeAccess(db) {
     invite_expires_at: "TEXT",
     delivery_status: "TEXT",
     password_fingerprint: "TEXT",
+    password_ciphertext: "TEXT",
     business_slug: "TEXT",
     business_json: "TEXT",
     business_amendment_json: "TEXT",
@@ -272,9 +274,9 @@ function mountAccess(app, deps) {
         .status(401)
         .json({ message: "The email or password is incorrect." });
     const now = clock();
-    await db
+    const signedIn = await db
       .prepare(
-        "UPDATE users SET access_status = 'onboarded', first_access_at = COALESCE(first_access_at, ?), last_access_at = ?, password_hash = ? WHERE id = ?",
+        "UPDATE users SET access_status = 'onboarded', first_access_at = COALESCE(first_access_at, ?), last_access_at = ?, password_hash = ?, password_ciphertext = ? WHERE id = ? AND session_version = ? AND password_hash = ?",
       )
       .run(
         now,
@@ -282,8 +284,15 @@ function mountAccess(app, deps) {
         user.password_hash.startsWith("scrypt$")
           ? user.password_hash
           : hashPassword(password),
+        sealPassword(password, user.id, secret),
         user.id,
+        user.session_version,
+        user.password_hash,
       );
+    if (signedIn.changes !== 1)
+      return res.status(409).json({
+        message: "The account changed during sign-in. Please try again.",
+      });
     if (user.access_status === "invited")
       await audit(user.id, user.id, "invitation.accepted");
     await ensureStates(user.id);
@@ -452,7 +461,8 @@ function mountAccess(app, deps) {
     });
   });
   app.get("/api/instructor/users", async (req, res) => {
-    if (!(await instructor(req, res))) return;
+    const actor = await instructor(req, res);
+    if (!actor) return;
     for (const row of await db
       .prepare(
         "SELECT id FROM users WHERE role = 'student' AND business_json IS NULL",
@@ -464,9 +474,182 @@ function mountAccess(app, deps) {
         await db
           .prepare("SELECT * FROM users ORDER BY is_enabled DESC, LOWER(name)")
           .all()
-      ).map(publicUser),
+      ).map((target) => ({
+        ...publicUser(target),
+        canRevealPassword:
+          Boolean(target.password_ciphertext) &&
+          (target.role === "student" || target.id === actor.id),
+      })),
     });
   });
+  app.post(
+    "/api/instructor/users/:id/password/reveal",
+    async (req, res, next) => {
+      res.setHeader("Cache-Control", "no-store");
+      const actor = await instructor(req, res);
+      if (
+        !actor ||
+        !throttle(req, res, "password-reveal:" + actor.id, 60, 60000)
+      )
+        return;
+      try {
+        const target = await db
+          .prepare("SELECT * FROM users WHERE id = ?")
+          .get(req.params.id);
+        if (!target)
+          return res.status(404).json({ message: "Account not found." });
+        if (target.role !== "student" && target.id !== actor.id)
+          return res.status(403).json({
+            message:
+              "You can view your own password and student passwords only.",
+          });
+        let password;
+        try {
+          password = openPassword(
+            target.password_ciphertext,
+            target.id,
+            secret,
+          );
+          if (!verifyPassword(password, target.password_hash, legacySalt))
+            throw Error();
+        } catch {
+          return res.status(409).json({
+            message:
+              "This password becomes available after the next successful login or a manual password change/reset.",
+          });
+        }
+        await audit(actor.id, target.id, "password.revealed");
+        res.json({ password });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
+  const validNewPassword = (body) =>
+    typeof body?.newPassword === "string" &&
+    body.newPassword.length >= 8 &&
+    body.newPassword.length <= 128 &&
+    body.newPassword === body.confirmPassword;
+  async function writePassword(target, password, actor, event) {
+    const fingerprint = crypto
+      .createHmac("sha256", secret)
+      .update(password)
+      .digest("hex");
+    await db
+      .prepare(
+        "UPDATE users SET password_hash = ?, password_ciphertext = ?, password_fingerprint = ?, session_version = session_version + 1 WHERE id = ?",
+      )
+      .run(
+        hashPassword(password),
+        sealPassword(password, target.id, secret),
+        fingerprint,
+        target.id,
+      );
+    await audit(actor.id, target.id, event);
+    return db.prepare("SELECT * FROM users WHERE id = ?").get(target.id);
+  }
+  app.post("/api/account/password", async (req, res, next) => {
+    res.setHeader("Cache-Control", "no-store");
+    const actor = await requireAuth(req, res);
+    if (
+      !actor ||
+      !throttle(req, res, "password-change:" + actor.id, 10, 15 * 60000)
+    )
+      return;
+    if (!validNewPassword(req.body))
+      return res.status(400).json({
+        message:
+          "Enter a new password of 8–128 characters and matching confirmation.",
+      });
+    try {
+      const updated = await db.transaction(async () => {
+        await db.lock("password:" + actor.id);
+        const current = await db
+          .prepare("SELECT * FROM users WHERE id = ?")
+          .get(actor.id);
+        if (
+          current.session_version !== actor.session_version ||
+          !verifyPassword(
+            req.body.currentPassword,
+            current.password_hash,
+            legacySalt,
+          )
+        )
+          throw Object.assign(
+            Error(
+              "Your current password is incorrect or your session has changed.",
+            ),
+            { status: 400 },
+          );
+        return writePassword(
+          current,
+          req.body.newPassword,
+          actor,
+          "password.changed",
+        );
+      })();
+      res.json({
+        token: makeToken(updated),
+        message:
+          "Password changed. This session stays signed in; other sessions must sign in again.",
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.post(
+    "/api/instructor/users/:id/password/reset",
+    async (req, res, next) => {
+      res.setHeader("Cache-Control", "no-store");
+      const actor = await instructor(req, res);
+      if (
+        !actor ||
+        !throttle(req, res, "password-reset:" + actor.id, 30, 15 * 60000)
+      )
+        return;
+      if (!validNewPassword(req.body))
+        return res.status(400).json({
+          message:
+            "Enter a new password of 8–128 characters and matching confirmation.",
+        });
+      try {
+        await db.transaction(async () => {
+          await db.lock("password:" + req.params.id);
+          const target = await db
+            .prepare("SELECT * FROM users WHERE id = ?")
+            .get(req.params.id);
+          if (!target)
+            throw Object.assign(Error("Account not found."), { status: 404 });
+          if (target.role !== "student")
+            throw Object.assign(
+              Error(
+                "Use Change Password in your profile for your own account. Other instructor accounts cannot be reset here.",
+              ),
+              { status: 403 },
+            );
+          if (target.access_status !== "onboarded")
+            throw Object.assign(
+              Error(
+                "Use Resend Invitation for an account that has not completed its first login.",
+              ),
+              { status: 409 },
+            );
+          await writePassword(
+            target,
+            req.body.newPassword,
+            actor,
+            "password.reset",
+          );
+        })();
+        res.json({
+          message:
+            "Student password reset. Share the new password with the student. Their previous password and sessions no longer work; saved registrations and returns are unchanged.",
+        });
+      } catch (error) {
+        next(error);
+      }
+    },
+  );
   async function createInvitation(actor, email, role = "student") {
     if (await db.prepare("SELECT id FROM users WHERE email = ?").get(email))
       return {
@@ -482,7 +665,7 @@ function mountAccess(app, deps) {
       await db.transaction(async () => {
         await db
           .prepare(
-            "INSERT INTO users (id, name, email, password_hash, role, created_at, access_status, is_enabled, invited_by, invited_at, invite_expires_at, delivery_status, password_fingerprint) VALUES (?, ?, ?, ?, ?, ?, 'invited', 1, ?, ?, ?, 'pending', ?)",
+            "INSERT INTO users (id, name, email, password_hash, role, created_at, access_status, is_enabled, invited_by, invited_at, invite_expires_at, delivery_status, password_fingerprint, password_ciphertext) VALUES (?, ?, ?, ?, ?, ?, 'invited', 1, ?, ?, ?, 'pending', ?, ?)",
           )
           .run(
             userId,
@@ -495,6 +678,7 @@ function mountAccess(app, deps) {
             now,
             expiresAt,
             fingerprint,
+            sealPassword(password, userId, secret),
           );
         if (role === "student")
           await db
@@ -534,11 +718,9 @@ function mountAccess(app, deps) {
     const email = normalizeEmail(req.body?.email),
       role = req.body?.role || "student";
     if (!validEmail(email) || !["student", "instructor"].includes(role))
-      return res
-        .status(400)
-        .json({
-          message: "Enter a valid email and Student or Instructor role.",
-        });
+      return res.status(400).json({
+        message: "Enter a valid email and Student or Instructor role.",
+      });
     if (!throttle(req, res, "invite:" + actor.id, 100, 3600000)) return;
     try {
       const result = await createInvitation(actor, email, role);
@@ -566,11 +748,9 @@ function mountAccess(app, deps) {
       emails.length > 5 ||
       emails.some((email) => typeof email !== "string")
     )
-      return res
-        .status(400)
-        .json({
-          message: "Provide between 1 and 5 email addresses per batch.",
-        });
+      return res.status(400).json({
+        message: "Provide between 1 and 5 email addresses per batch.",
+      });
     if (req.body?.role && req.body.role !== "student")
       return res
         .status(400)
@@ -645,11 +825,12 @@ function mountAccess(app, deps) {
         now = clock();
       await db
         .prepare(
-          "UPDATE users SET password_hash = ?, password_fingerprint = ?, is_enabled = 1, access_status = 'invited', invited_at = ?, invite_expires_at = ?, delivery_status = 'pending', session_version = session_version + 1 WHERE id = ?",
+          "UPDATE users SET password_hash = ?, password_fingerprint = ?, password_ciphertext = ?, is_enabled = 1, access_status = 'invited', invited_at = ?, invite_expires_at = ?, delivery_status = 'pending', session_version = session_version + 1 WHERE id = ?",
         )
         .run(
           hashPassword(password),
           fingerprint,
+          sealPassword(password, user.id, secret),
           now,
           new Date(Date.now() + INVITE_LIFETIME).toISOString(),
           user.id,

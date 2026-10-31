@@ -440,11 +440,7 @@ function draft3b(p, homeState) {
     (i) => i.nature && i.nature !== "Taxable",
   )) {
     const key = i.nature === "Non-GST" ? "nongst" : "exempt",
-      h =
-        i.gstin.slice(0, 2) ===
-        Object.entries(STATE_CODES).find(([, v]) => v === homeState)?.[0]
-          ? "cgst"
-          : "igst";
+      h = purchaseIsInterstate(i.gstin, i.place || homeState) ? "igst" : "cgst";
     five[key].taxes[h] += i.taxable;
   }
   const signed = (rows, keys) => ({
@@ -632,6 +628,9 @@ function parseGstr3b(d) {
   if (!Object.keys(out).length) fail("No supported GSTR-3B tables found.");
   return out;
 }
+function purchaseIsInterstate(gstin, place) {
+  return stateName(gstin.slice(0, 2)) !== stateName(place);
+}
 function purchaseRow(input, period, homeState) {
   const gstin = String(input.gstin || "").toUpperCase();
   if (!/^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/.test(gstin))
@@ -645,9 +644,7 @@ function purchaseRow(input, period, homeState) {
     rate = amount(input.rate),
     taxable = amount(input.taxable),
     tax = round((taxable * rate) / 100),
-    inter =
-      gstin.slice(0, 2) !==
-      Object.entries(STATE_CODES).find(([, v]) => v === homeState)?.[0];
+    inter = purchaseIsInterstate(gstin, place);
   if (![0, 0.1, 0.25, 1, 1.5, 3, 5, 6, 7.5, 12, 18, 28, 40].includes(rate))
     fail("Select a valid GST rate.");
   if (
@@ -682,7 +679,14 @@ function purchaseRow(input, period, homeState) {
       input.invoiceValue === undefined
         ? round(taxable + total(taxes))
         : amount(input.invoiceValue),
-    match: input.match || "Matched",
+    match:
+      !inter && place !== stateName(homeState)
+        ? "Ineligible"
+        : input.match || "Matched",
+    itcReason:
+      !inter && place !== stateName(homeState)
+        ? "Supplier and Place of Supply are in the same state, while the recipient is registered in another state."
+        : "",
     includedIn2b: input.includedIn2b !== false,
     documentType: input.documentType || "Invoice",
     nature: input.nature || "Taxable",
@@ -1001,12 +1005,14 @@ function attachment(a) {
   const bytes = Buffer.from(match[2], "base64");
   if (bytes.length > 1048576) fail("Attachments must be 1 MB or smaller.");
   const magic = bytes.subarray(0, 8).toString("hex");
-  if (!(
-    (match[1] === "application/pdf" &&
-      bytes.subarray(0, 5).toString() === "%PDF-") ||
-    (match[1] === "image/png" && magic === "89504e470d0a1a0a") ||
-    (match[1] === "image/jpeg" && magic.startsWith("ffd8ff"))
-  ))
+  if (
+    !(
+      (match[1] === "application/pdf" &&
+        bytes.subarray(0, 5).toString() === "%PDF-") ||
+      (match[1] === "image/png" && magic === "89504e470d0a1a0a") ||
+      (match[1] === "image/jpeg" && magic.startsWith("ffd8ff"))
+    )
+  )
     fail("File contents do not match the selected file type.");
   return {
     name: String(a.name || "Document").slice(0, 120),

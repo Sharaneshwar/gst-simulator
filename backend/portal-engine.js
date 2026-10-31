@@ -1031,7 +1031,11 @@ function mountPortal(app, deps) {
     const i = p.purchases.findIndex((i) => i.id === row.id);
     if (i >= 0) p.purchases[i] = row;
     else p.purchases.push(row);
-    return { message: "Supplier document saved." };
+    return {
+      message: row.itcReason
+        ? `Supplier document saved. ITC unavailable: ${row.itcReason}`
+        : "Supplier document saved.",
+    };
   });
   route("purchases/upload", (body, w, p, ctx) => {
     if (

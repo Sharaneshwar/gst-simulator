@@ -12,6 +12,7 @@ import {
   Spinner,
 } from "./lib";
 import { BulkInviteDialog } from "./bulk-invite-dialog";
+import { PasswordDialog } from "./password-dialog";
 import "./access.css";
 
 const roleLabel = (role) => (role === "instructor" ? "Instructor" : "Student");
@@ -35,7 +36,8 @@ const invitationStatus = (user) =>
           : "Sending";
 
 export function UserAccess() {
-  const { user, token, api, setError, setNotice } = usePortal();
+  const { user, token, api, setError, setNotice, acceptSession, load } =
+    usePortal();
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("onboarded");
@@ -46,6 +48,16 @@ export function UserAccess() {
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState(null);
   const [reviewNote, setReviewNote] = useState("");
+  const [passwordTarget, setPasswordTarget] = useState(null);
+  const [revealed, setRevealed] = useState(null);
+  useEffect(() => {
+    setRevealed(null);
+  }, [selected]);
+  useEffect(() => {
+    if (!revealed) return;
+    const timer = setTimeout(() => setRevealed(null), 60000);
+    return () => clearTimeout(timer);
+  }, [revealed]);
   async function refresh(showLoading = true) {
     if (showLoading) setLoading(true);
     try {
@@ -293,6 +305,12 @@ export function UserAccess() {
                       <div className="access-actions">
                         <Btn
                           tone="secondary"
+                          onClick={() => setSelected(item.id)}
+                        >
+                          VIEW
+                        </Btn>
+                        <Btn
+                          tone="secondary"
                           onClick={() => action(item, "resend")}
                         >
                           RESEND
@@ -384,6 +402,20 @@ export function UserAccess() {
           </form>
         </Modal>
       )}
+      {passwordTarget && (
+        <PasswordDialog
+          target={passwordTarget}
+          onClose={() => setPasswordTarget(null)}
+          onSaved={async (result) => {
+            if (result.token) {
+              acceptSession(result.token);
+              await load(result.token);
+            } else await refresh(false);
+            setPasswordTarget(null);
+            setNotice(result.message);
+          }}
+        />
+      )}
       {detail && (
         <Modal title="Account details" onClose={() => setSelected(null)}>
           <dl className="details-list">
@@ -393,6 +425,44 @@ export function UserAccess() {
             <dd>{detail.email}</dd>
             <dt>Role</dt>
             <dd>{roleLabel(detail.role)}</dd>
+            {(detail.role === "student" || detail.id === user.id) && (
+              <>
+                <dt>Password</dt>
+                <dd>
+                  {revealed?.id === detail.id ? (
+                    <>
+                      <code className="account-password">
+                        {revealed.password}
+                      </code>
+                      <Btn tone="secondary" onClick={() => setRevealed(null)}>
+                        HIDE PASSWORD
+                      </Btn>
+                    </>
+                  ) : detail.canRevealPassword ? (
+                    <Btn
+                      tone="secondary"
+                      onClick={async () => {
+                        const result = await api(
+                          `/instructor/users/${detail.id}/password/reveal`,
+                          {},
+                        );
+                        setRevealed({
+                          id: detail.id,
+                          password: result.password,
+                        });
+                      }}
+                    >
+                      SHOW PASSWORD
+                    </Btn>
+                  ) : (
+                    <span>
+                      Available after their next successful login or a password
+                      change/reset.
+                    </span>
+                  )}
+                </dd>
+              </>
+            )}
             {detail.business && (
               <>
                 <dt>GSTIN</dt>
@@ -402,6 +472,24 @@ export function UserAccess() {
               </>
             )}
           </dl>
+          {(detail.id === user.id ||
+            (detail.role === "student" &&
+              detail.accessStatus === "onboarded")) && (
+            <div className="actions">
+              <Btn
+                tone="secondary"
+                onClick={() => {
+                  setPasswordTarget(detail);
+                  setRevealed(null);
+                  setSelected(null);
+                }}
+              >
+                {detail.id === user.id
+                  ? "CHANGE MY PASSWORD"
+                  : "RESET STUDENT PASSWORD"}
+              </Btn>
+            </div>
+          )}
           {detail.amendment && (
             <section className="access-review">
               <h3>Core-field amendment — {detail.amendment.status}</h3>
@@ -465,7 +553,9 @@ export function UserAccess() {
 }
 
 export function MyProfile() {
-  const { user, active, api, load, setError, setNotice, go } = usePortal();
+  const { user, active, api, load, setError, setNotice, go, acceptSession } =
+    usePortal();
+  const [changingPassword, setChangingPassword] = useState(false);
   const [name, setName] = useState(user.name);
   const [amending, setAmending] = useState(false);
   const [form, setForm] = useState(null);
@@ -501,6 +591,11 @@ export function MyProfile() {
           <dt>Last Accessed (IST)</dt>
           <dd>{timestamp(user.lastAccessAt)}</dd>
         </dl>
+        <div className="actions">
+          <Btn tone="secondary" onClick={() => setChangingPassword(true)}>
+            CHANGE PASSWORD
+          </Btn>
+        </div>
         {user.role === "instructor" && (
           <form
             className="access-profile-form"
@@ -589,6 +684,17 @@ export function MyProfile() {
           </div>
         )}
       </Panel>
+      {changingPassword && (
+        <PasswordDialog
+          onClose={() => setChangingPassword(false)}
+          onSaved={async (result) => {
+            acceptSession(result.token);
+            await load(result.token);
+            setChangingPassword(false);
+            setNotice(result.message);
+          }}
+        />
+      )}
       {amending && (
         <Modal
           title="Amendment of Registration — Core Fields"

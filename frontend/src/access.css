@@ -222,3 +222,13 @@
 .bulk-results td {
   white-space: normal;
 }
+
+.account-password {
+  display: inline-block;
+  margin-right: 12px;
+  padding: 8px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: all;
+  font-family: monospace;
+}
