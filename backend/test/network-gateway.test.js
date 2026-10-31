@@ -64,8 +64,20 @@ test("middleware gates unknown browsers and private assets, while home network p
 });
 let cookie, id;
 test("same-origin gateway sets private cookies, never approves requests, and rejects cross-site enrollment", async () => {
+  // Vercel's response provides send/status/setHeader, but not Express's type().
+  const vercelResponse = {
+    headers: {},
+    setHeader(key, value) { this.headers[key] = value; },
+    status(code) { this.code = code; return this; },
+    send(body) { this.body = body; return this; },
+  };
+  await handler({ method: "GET", query: { action: "page" } }, vercelResponse);
+  assert.equal(vercelResponse.code, 200);
+  assert.match(vercelResponse.headers["Content-Type"], /text\/html/);
+  assert.match(vercelResponse.body, /Request browser access/);
   const management = await fetch(edgeUrl + "/api/network?action=page");
   assert.equal(management.status, 200);
+  assert.match(management.headers.get("content-type"), /text\/html/);
   const html = await management.text();
   assert.match(html, /Request browser access/);
   assert.match(html, /This network is approved/);

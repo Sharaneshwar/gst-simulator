@@ -3,8 +3,10 @@ import { accessPage } from "../network/page.js";
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store, private");
   const action = String(req.query?.action || "session");
-  if (action === "page" && req.method === "GET")
-    return res.status(200).type("html").send(accessPage());
+  if (action === "page" && req.method === "GET") {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(accessPage());
+  }
   const method = action === "enroll" ? "POST" : "GET";
   if (!["session", "enroll"].includes(action) || req.method !== method)
     return res.status(405).json({ message: "Unsupported request." });
