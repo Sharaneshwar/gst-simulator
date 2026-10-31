@@ -32,8 +32,6 @@ const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:5050/api";
 const publicRoutes = [
   "home",
   "login",
-  "registration",
-  "track",
   "news",
   "help",
   "law",
@@ -481,9 +479,13 @@ export default function App() {
     await load(data.token);
     localStorage.setItem("gstPortalToken", data.token);
     setToken(data.token);
-    window.location.hash = "/" + intended;
+    const destination = publicRoutes.includes(route.split("/")[0])
+      ? intended
+      : route;
+    window.location.hash = "/" + destination;
   }
   function logout() {
+    setIntended("dashboard");
     localStorage.removeItem("gstPortalToken");
     setToken("");
     setPortal(null);

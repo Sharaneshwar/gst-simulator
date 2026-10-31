@@ -1,5 +1,7 @@
 # Registration and account consistency
 
+Registration and application tracking require an authenticated account. Public registration buttons open Login; after signing in, the requested registration screen opens. Direct registration links also show Login until authentication succeeds. Registration API operations reject missing/invalid sessions before changing drafts or sending OTPs.
+
 Invitations create **student access from one email address**. They do not collect a business name, trade name, PAN or GSTIN. Email remains the unique, immutable login identifier; invitation expiry, resending and access controls are retained. Existing accounts and their saved businesses are preserved.
 
 New students see an empty registration workspace, without a fabricated company identity, invoices or ledger balances. Returns and document actions become available after registration submission. Registration verification and OTP delivery use the account email. Promoter, authorized signatory and principal-place email fields default to that email; those contact fields remain editable for practising different people. New records get the same defaults. Part A's state/district and mobile populate relevant later fields. Selecting Aadhaar authentication and signing uses saved authorized signatories.

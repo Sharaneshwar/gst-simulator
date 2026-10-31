@@ -145,6 +145,20 @@ test("authentication rejects missing tokens and invalid credentials", async () =
   assert.ok(token);
   assert.ok(instructorToken);
 });
+test("all registration operations require login before changing drafts or sending OTPs", async () => {
+  const before = await request("/portal");
+  const emailCount = delivered.length;
+  for (const endpoint of ["new", "start", "verify", "resume", "resume-verify", "save", "submit"]) {
+    for (const auth of ["", "invalid-session"]) {
+      const result = await request("/workspace/registration/" + endpoint, {}, auth);
+      assert.equal(result.code, 401, endpoint);
+    }
+  }
+  assert.equal((await request("/portal/applications/open", { reference: "unknown" }, "")).code, 401);
+  assert.equal(delivered.length, emailCount);
+  const after = await request("/portal");
+  assert.deepEqual(after.activeCase.state.workspace.registration, before.activeCase.state.workspace.registration);
+});
 test("workspace migration retains old seed records and separates user records", async () => {
   await reset();
   const result = await request("/portal");
