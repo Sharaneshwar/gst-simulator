@@ -1,6 +1,15 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Btn, Input, Modal, Select, Table, usePortal } from "./lib";
+import {
+  Btn,
+  Input,
+  Modal,
+  Select,
+  Table,
+  usePortal,
+  InlineLoader,
+  TableSkeleton,
+} from "./lib";
 
 // Shared by registration, HSN summaries and document line items. The list lives
 // outside scrolling tables so suggestions stay usable on small screens.
@@ -150,6 +159,7 @@ export function HsnSearch({
         setOpen(true);
       }}
       onKeyDown={(e) => {
+        if (loading && e.key !== "Escape") return;
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
           e.preventDefault();
           setOpen(true);
@@ -230,37 +240,49 @@ export function HsnSearch({
           <div ref={menu} className="hsn-suggestions" style={position}>
             <div className="hsn-search-status" role="status">
               {error ||
-                (loading
-                  ? "Searching…"
-                  : !validQuery
-                    ? "Search by code or description."
-                    : !total
-                      ? "No matching HSN / SAC codes found."
-                      : `${total} matching ${total === 1 ? "code" : "codes"}`)}
+                (loading ? (
+                  <InlineLoader label="Searching HSN and SAC codes" />
+                ) : !validQuery ? (
+                  "Search by code or description."
+                ) : !total ? (
+                  "No matching HSN / SAC codes found."
+                ) : (
+                  `${total} matching ${total === 1 ? "code" : "codes"}`
+                ))}
             </div>
             <ul
               id={`${id}-list`}
               role="listbox"
               aria-label="HSN / SAC search results"
             >
-              {results.map((record, i) => (
-                <li
-                  id={`${id}-${i}`}
-                  key={record.code}
-                  role="option"
-                  aria-selected={active === i}
-                  className={active === i ? "active" : ""}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onMouseEnter={() => setActive(i)}
-                  onClick={() => select(record)}
-                >
-                  <strong>{record.code}</strong>
-                  <span>{record.description}</span>
-                  <small>{record.type}</small>
+              {loading && (
+                <li role="presentation">
+                  <TableSkeleton
+                    columns={2}
+                    rows={3}
+                    label="Loading search results"
+                  />
                 </li>
-              ))}
+              )}
+              {!loading &&
+                results.map((record, i) => (
+                  <li
+                    id={`${id}-${i}`}
+                    key={record.code}
+                    role="option"
+                    aria-selected={active === i}
+                    className={active === i ? "active" : ""}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => setActive(i)}
+                    onClick={() => select(record)}
+                  >
+                    <strong>{record.code}</strong>
+                    <span>{record.description}</span>
+                    <small>{record.type}</small>
+                  </li>
+                ))}
             </ul>
-            {total > results.length && (
+            {!loading && total > results.length && (
               <p className="hsn-search-status">
                 Showing the first {results.length} matches. Enter a longer code
                 or description to narrow your search.
@@ -482,30 +504,40 @@ function HsnBrowser({ type, registration, minimumDigits, onSelect, onClose }) {
         )}
         <p role="status">
           {error ||
-            (loading
-              ? "Loading codes…"
-              : !valid
-                ? "Enter at least 2 digits or 3 letters, or clear the search to browse."
-                : `${result.total} ${kind ? kind.toLowerCase() + " " : ""}codes`)}
+            (loading ? (
+              <InlineLoader label="Loading HSN and SAC directory" />
+            ) : !valid ? (
+              "Enter at least 2 digits or 3 letters, or clear the search to browse."
+            ) : (
+              `${result.total} ${kind ? kind.toLowerCase() + " " : ""}codes`
+            ))}
         </p>
-        <Table
-          columns={["HSN / SAC", "Description", "Action"]}
-          count={result.results.length}
-          empty={loading ? "Loading codes…" : "No matching codes found."}
-        >
-          {result.results.map((record) => (
-            <tr key={record.code}>
-              <td>
-                <strong>{record.code}</strong>
-                <small>{record.type}</small>
-              </td>
-              <td className="hsn-description">{record.description}</td>
-              <td>
-                <Btn onClick={() => onSelect(record)}>SELECT</Btn>
-              </td>
-            </tr>
-          ))}
-        </Table>
+        {loading ? (
+          <TableSkeleton
+            columns={3}
+            rows={5}
+            label="Loading HSN and SAC directory"
+          />
+        ) : (
+          <Table
+            columns={["HSN / SAC", "Description", "Action"]}
+            count={result.results.length}
+            empty="No matching codes found."
+          >
+            {result.results.map((record) => (
+              <tr key={record.code}>
+                <td>
+                  <strong>{record.code}</strong>
+                  <small>{record.type}</small>
+                </td>
+                <td className="hsn-description">{record.description}</td>
+                <td>
+                  <Btn onClick={() => onSelect(record)}>SELECT</Btn>
+                </td>
+              </tr>
+            ))}
+          </Table>
+        )}
         <div className="actions hsn-directory-pages">
           <Btn
             tone="secondary"

@@ -112,11 +112,11 @@ async function initializeAccess(db) {
 function allowed(user, now = Date.now()) {
   return Boolean(
     user &&
-    user.is_enabled &&
-    (user.access_status === "onboarded" ||
-      (user.access_status === "invited" &&
-        user.delivery_status === "sent" &&
-        Date.parse(user.invite_expires_at) > now)),
+      user.is_enabled &&
+      (user.access_status === "onboarded" ||
+        (user.access_status === "invited" &&
+          user.delivery_status === "sent" &&
+          Date.parse(user.invite_expires_at) > now)),
   );
 }
 function publicUser(user) {
@@ -157,13 +157,13 @@ function mountAccess(app, deps) {
   } = deps;
   const clock = () => new Date().toISOString();
   const limits = new Map();
-  function throttle(req, res, action, ceiling, windowMs) {
+  function throttle(req, res, action, ceiling, windowMs, cost = 1) {
     const now = Date.now(),
       key = `${action}:${req.ip}`;
     if (limits.size > 10000)
       for (const [k, value] of limits) if (value.until < now) limits.delete(k);
     const limit = limits.get(key);
-    if (limit && limit.until > now && limit.count >= ceiling) {
+    if (limit && limit.until > now && limit.count + cost > ceiling) {
       res.setHeader("Retry-After", Math.ceil((limit.until - now) / 1000));
       res
         .status(429)
@@ -173,8 +173,8 @@ function mountAccess(app, deps) {
     limits.set(
       key,
       limit && limit.until > now
-        ? { ...limit, count: limit.count + 1 }
-        : { count: 1, until: now + windowMs },
+        ? { ...limit, count: limit.count + cost }
+        : { count: cost, until: now + windowMs },
     );
     return true;
   }
@@ -330,11 +330,9 @@ function mountAccess(app, deps) {
       .get(user.id);
     const business = JSON.parse(current.business_json);
     if (business?.registrationRequired)
-      return res
-        .status(400)
-        .json({
-          message: "Complete a registration before amending business details.",
-        });
+      return res.status(400).json({
+        message: "Complete a registration before amending business details.",
+      });
     const previous =
       current.business_amendment_json &&
       JSON.parse(current.business_amendment_json);
@@ -469,60 +467,159 @@ function mountAccess(app, deps) {
       ).map(publicUser),
     });
   });
-  app.post("/api/instructor/users/invite", async (req, res, next) => {
-    const actor = await instructor(req, res);
-    if (!actor || !throttle(req, res, "invite", 20, 3600000)) return;
-    const email = normalizeEmail(req.body?.email),
-      name = email,
-      role = req.body?.role || "student";
-    if (!validEmail(email) || !["student", "instructor"].includes(role))
-      return res.status(400).json({
-        message: "Enter a valid email and Student or Instructor role.",
-      });
+  async function createInvitation(actor, email, role = "student") {
     if (await db.prepare("SELECT id FROM users WHERE email = ?").get(email))
-      return res
-        .status(409)
-        .json({ message: "This email already has an account or invitation." });
+      return {
+        email,
+        status: "exists",
+        message: "Account or invitation already exists.",
+      };
+    const { password, fingerprint } = await uniquePassword();
+    const now = clock(),
+      userId = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + INVITE_LIFETIME).toISOString();
     try {
-      const { password, fingerprint } = await uniquePassword(),
-        now = clock(),
-        userId = crypto.randomUUID();
-      const expiresAt = new Date(Date.now() + INVITE_LIFETIME).toISOString();
-      await db
-        .prepare(
-          "INSERT INTO users (id, name, email, password_hash, role, created_at, access_status, is_enabled, invited_by, invited_at, invite_expires_at, delivery_status, password_fingerprint) VALUES (?, ?, ?, ?, ?, ?, 'invited', 1, ?, ?, ?, 'pending', ?)",
-        )
-        .run(
-          userId,
-          name,
-          email,
-          hashPassword(password),
-          role,
-          now,
-          actor.id,
-          now,
-          expiresAt,
-          fingerprint,
-        );
-      if (role === "student")
+      await db.transaction(async () => {
         await db
           .prepare(
-            "UPDATE users SET business_slug = 'regular-october', business_json = ? WHERE id = ?",
+            "INSERT INTO users (id, name, email, password_hash, role, created_at, access_status, is_enabled, invited_by, invited_at, invite_expires_at, delivery_status, password_fingerprint) VALUES (?, ?, ?, ?, ?, ?, 'invited', 1, ?, ?, ?, 'pending', ?)",
           )
-          .run(JSON.stringify({ registrationRequired: true }), userId);
-      await audit(actor.id, userId, "invitation.created");
-      const delivered = await deliver(
+          .run(
+            userId,
+            email,
+            email,
+            hashPassword(password),
+            role,
+            now,
+            actor.id,
+            now,
+            expiresAt,
+            fingerprint,
+          );
+        if (role === "student")
+          await db
+            .prepare(
+              "UPDATE users SET business_slug = 'regular-october', business_json = ? WHERE id = ?",
+            )
+            .run(JSON.stringify({ registrationRequired: true }), userId);
+        await audit(actor.id, userId, "invitation.created");
+      })();
+    } catch (error) {
+      if (error.code === "23505" || error.code === "SQLITE_CONSTRAINT_UNIQUE")
+        return {
+          email,
+          status: "exists",
+          message: "Account or invitation already exists.",
+        };
+      throw error;
+    }
+    const user = await db
+      .prepare("SELECT * FROM users WHERE id = ?")
+      .get(userId);
+    const sent = await deliver(user, password, actor);
+    return {
+      email,
+      status: sent ? "sent" : "delivery_failed",
+      user: publicUser(
         await db.prepare("SELECT * FROM users WHERE id = ?").get(userId),
-        password,
-        actor,
-      );
+      ),
+      message: sent
+        ? "Invitation accepted by the email provider."
+        : "Account saved; email failed. Use Resend in the invitation list.",
+    };
+  }
+  app.post("/api/instructor/users/invite", async (req, res, next) => {
+    const actor = await instructor(req, res);
+    if (!actor) return;
+    const email = normalizeEmail(req.body?.email),
+      role = req.body?.role || "student";
+    if (!validEmail(email) || !["student", "instructor"].includes(role))
+      return res
+        .status(400)
+        .json({
+          message: "Enter a valid email and Student or Instructor role.",
+        });
+    if (!throttle(req, res, "invite:" + actor.id, 100, 3600000)) return;
+    try {
+      const result = await createInvitation(actor, email, role);
+      if (result.status === "exists")
+        return res.status(409).json({ message: result.message });
       res.status(201).json({
-        user: publicUser(
-          await db.prepare("SELECT * FROM users WHERE id = ?").get(userId),
-        ),
-        message: delivered
-          ? "Invitation sent successfully."
-          : "Invitation saved, but email delivery failed. Use Resend Invitation to try again.",
+        user: result.user,
+        message:
+          result.status === "sent"
+            ? "Invitation sent successfully."
+            : "Invitation saved, but email delivery failed. Use Resend Invitation to try again.",
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+  app.post("/api/instructor/users/invite-bulk", async (req, res, next) => {
+    const actor = await instructor(req, res);
+    if (!actor) return;
+    const emails = req.body?.emails;
+    // The UI sends small batches and displays progress between them.
+    if (
+      !Array.isArray(emails) ||
+      !emails.length ||
+      emails.length > 5 ||
+      emails.some((email) => typeof email !== "string")
+    )
+      return res
+        .status(400)
+        .json({
+          message: "Provide between 1 and 5 email addresses per batch.",
+        });
+    if (req.body?.role && req.body.role !== "student")
+      return res
+        .status(400)
+        .json({ message: "Bulk invitations are for students." });
+    if (!throttle(req, res, "invite:" + actor.id, 100, 3600000, emails.length))
+      return;
+    try {
+      const seen = new Set(),
+        results = new Array(emails.length),
+        queue = [];
+      emails.forEach((value, index) => {
+        const email = normalizeEmail(value);
+        if (!validEmail(email))
+          results[index] = {
+            email,
+            status: "invalid",
+            message: "Enter a valid email address.",
+          };
+        else if (seen.has(email))
+          results[index] = {
+            email,
+            status: "duplicate",
+            message: "Duplicate skipped.",
+          };
+        else {
+          seen.add(email);
+          queue.push({ email, index });
+        }
+      });
+      let cursor = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(3, queue.length) }, async () => {
+          while (cursor < queue.length) {
+            const { email, index } = queue[cursor++];
+            try {
+              results[index] = await createInvitation(actor, email);
+            } catch {
+              results[index] = {
+                email,
+                status: "failed",
+                message: "Unable to create this invitation. Try again.",
+              };
+            }
+          }
+        }),
+      );
+      res.json({
+        results,
+        sent: results.filter((row) => row.status === "sent").length,
       });
     } catch (error) {
       next(error);
@@ -530,7 +627,8 @@ function mountAccess(app, deps) {
   });
   app.post("/api/instructor/users/:id/resend", async (req, res, next) => {
     const actor = await instructor(req, res);
-    if (!actor || !throttle(req, res, "invite", 20, 3600000)) return;
+    if (!actor || !throttle(req, res, "invite:" + actor.id, 100, 3600000))
+      return;
     const user = await db
       .prepare("SELECT * FROM users WHERE id = ?")
       .get(req.params.id);

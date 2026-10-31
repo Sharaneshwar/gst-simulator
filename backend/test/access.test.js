@@ -445,6 +445,121 @@ test("business name amendments require review, cannot change PAN/GSTIN, and reta
     409,
   );
 });
+test("bulk invitations enforce instructor access and report validation, duplicates and delivery failures separately", async () => {
+  const route = "/instructor/users/invite-bulk";
+  assert.equal(
+    (await request(route, { emails: ["bulk-denied@example.com"] }, student))
+      .status,
+    403,
+  );
+  assert.equal(
+    (await request(route, { emails: ["bulk-denied@example.com"] }, "")).status,
+    401,
+  );
+  assert.equal((await request(route, { emails: [] })).status, 400);
+  assert.equal(
+    (
+      await request(route, {
+        emails: Array(6).fill("bulk-invalid@example.com"),
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await request(route, {
+        emails: ["bulk-denied@example.com"],
+        role: "instructor",
+      })
+    ).status,
+    400,
+  );
+  const captured = [];
+  app.locals.sendInvitation = async (message) => {
+    captured.push(message);
+    if (message.to === "bulk-failure@example.com")
+      throw Error("Mock provider failure");
+  };
+  try {
+    const result = await request(route, {
+      emails: [
+        " BULK-ONE@example.com ",
+        "bulk-one@example.com",
+        "bad-address",
+        "student@demo.com",
+        "bulk-failure@example.com",
+      ],
+    });
+    assert.equal(result.status, 200);
+    assert.deepEqual(
+      result.results.map((row) => row.status),
+      ["sent", "duplicate", "invalid", "exists", "delivery_failed"],
+    );
+    assert.equal(result.sent, 1);
+    assert.equal(captured.length, 2);
+    assert.equal(new Set(captured.map((row) => row.password)).size, 2);
+    for (const row of result.results) {
+      assert.equal(row.password, undefined);
+      assert.equal(row.user?.password_hash, undefined);
+      if (row.user) {
+        assert.equal(row.user.role, "student");
+        assert.equal(row.user.registrationRequired, true);
+      }
+    }
+    assert.equal(
+      (
+        await request(
+          "/auth/access-check",
+          { email: "bulk-failure@example.com" },
+          "",
+        )
+      ).allowed,
+      false,
+    );
+    const retry = await request(route, {
+      emails: ["bulk-one@example.com", "bulk-failure@example.com"],
+    });
+    assert.deepEqual(
+      retry.results.map((row) => row.status),
+      ["exists", "exists"],
+    );
+    assert.equal(
+      captured.length,
+      2,
+      "retrying a batch must not send duplicate emails",
+    );
+  } finally {
+    app.locals.sendInvitation = async (message) => sent.push(message);
+  }
+});
+test("concurrent bulk submissions create only one account and one invitation per address", async () => {
+  const captured = [];
+  app.locals.sendInvitation = async (message) => captured.push(message);
+  try {
+    const attempts = await Promise.all(
+      [1, 2].map(() =>
+        request("/instructor/users/invite-bulk", {
+          emails: ["bulk-race@example.com"],
+        }),
+      ),
+    );
+    assert.deepEqual(attempts.map((row) => row.results[0].status).sort(), [
+      "exists",
+      "sent",
+    ]);
+    assert.equal(captured.length, 1);
+    assert.equal(
+      (
+        await db
+          .prepare("SELECT COUNT(*) AS n FROM users WHERE email = ?")
+          .get("bulk-race@example.com")
+      ).n,
+      1,
+    );
+  } finally {
+    app.locals.sendInvitation = async (message) => sent.push(message);
+  }
+});
 test("startup preserves invited users, instructor profile edits, and existing passwords", async () => {
   await request("/account/profile", { name: "My Instructor" });
   const before = (
@@ -494,17 +609,44 @@ test("startup preserves invited users, instructor profile edits, and existing pa
 });
 
 test("disabled demo seeding never recreates a deleted demo account on restart", async () => {
-  const before = (await db.prepare("SELECT COUNT(*) AS count FROM users").get()).count;
-  await db.prepare("DELETE FROM user_case_state WHERE user_id = ?").run("user-student-demo");
+  const before = (await db.prepare("SELECT COUNT(*) AS count FROM users").get())
+    .count;
+  await db
+    .prepare("DELETE FROM user_case_state WHERE user_id = ?")
+    .run("user-student-demo");
   await db.prepare("DELETE FROM users WHERE id = ?").run("user-student-demo");
-  const child = spawnSync(process.execPath, ["-e", "const s=require('./server'); s.ready.then(()=>s.db.close()).catch(e=>{console.error(e.code||e.message);process.exitCode=1})"], {
-    cwd: path.join(__dirname, ".."),
-    env: { ...process.env, GST_SEED_DEMO_USERS: "0" },
-    encoding: "utf8",
-  });
+  const child = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      "const s=require('./server'); s.ready.then(()=>s.db.close()).catch(e=>{console.error(e.code||e.message);process.exitCode=1})",
+    ],
+    {
+      cwd: path.join(__dirname, ".."),
+      env: { ...process.env, GST_SEED_DEMO_USERS: "0" },
+      encoding: "utf8",
+    },
+  );
   assert.equal(child.status, 0, child.stderr);
-  assert.equal(await db.prepare("SELECT id FROM users WHERE id = ?").get("user-student-demo"), undefined);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS count FROM users").get()).count, before - 1);
-  assert.equal((await db.prepare("SELECT name FROM users WHERE id = ?").get("user-instructor-demo")).name, "My Instructor");
-  assert.ok(await db.prepare("SELECT id FROM users WHERE id = ?").get(first.user.id));
+  assert.equal(
+    await db
+      .prepare("SELECT id FROM users WHERE id = ?")
+      .get("user-student-demo"),
+    undefined,
+  );
+  assert.equal(
+    (await db.prepare("SELECT COUNT(*) AS count FROM users").get()).count,
+    before - 1,
+  );
+  assert.equal(
+    (
+      await db
+        .prepare("SELECT name FROM users WHERE id = ?")
+        .get("user-instructor-demo")
+    ).name,
+    "My Instructor",
+  );
+  assert.ok(
+    await db.prepare("SELECT id FROM users WHERE id = ?").get(first.user.id),
+  );
 });

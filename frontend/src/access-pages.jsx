@@ -1,5 +1,17 @@
 import { useEffect, useState } from "react";
-import { Btn, Crumbs, Input, Modal, Panel, Table, usePortal } from "./lib";
+import {
+  Btn,
+  Crumbs,
+  Input,
+  Modal,
+  Panel,
+  Table,
+  usePortal,
+  TableSkeleton,
+  Skeleton,
+  Spinner,
+} from "./lib";
+import { BulkInviteDialog } from "./bulk-invite-dialog";
 import "./access.css";
 
 const roleLabel = (role) => (role === "instructor" ? "Instructor" : "Student");
@@ -29,12 +41,19 @@ export function UserAccess() {
   const [tab, setTab] = useState("onboarded");
   const [search, setSearch] = useState("");
   const [invite, setInvite] = useState(null);
+  const [bulkInvite, setBulkInvite] = useState(false);
+  const [actionBusy, setActionBusy] = useState("");
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState(null);
   const [reviewNote, setReviewNote] = useState("");
-  async function refresh() {
-    const result = await api("/instructor/users");
-    setUsers(result.users);
+  async function refresh(showLoading = true) {
+    if (showLoading) setLoading(true);
+    try {
+      const result = await api("/instructor/users");
+      setUsers(result.users);
+    } finally {
+      if (showLoading) setLoading(false);
+    }
   }
   useEffect(() => {
     if (user.role !== "instructor") return;
@@ -79,33 +98,46 @@ export function UserAccess() {
   );
   const detail = users.find((item) => item.id === selected);
   async function action(item, suffix, body = {}) {
-    const result = await api(`/instructor/users/${item.id}/${suffix}`, body);
-    await refresh();
-    setNotice(result.message);
+    setActionBusy(item.id);
+    try {
+      const result = await api(`/instructor/users/${item.id}/${suffix}`, body);
+      await refresh(false);
+      setNotice(result.message);
+    } finally {
+      setActionBusy("");
+    }
   }
   return (
     <div className="container access-page">
       <Crumbs items={["User Access"]} />
       <div className="dashboard-title">
         <h1>User Access</h1>
-        <Btn
-          onClick={() => {
-            setError("");
-            setInvite({ email: "" });
-          }}
-        >
-          INVITE USER
-        </Btn>
+        <div className="access-actions">
+          <Btn
+            tone="secondary"
+            onClick={() => {
+              setError("");
+              setBulkInvite(true);
+            }}
+          >
+            BULK INVITE
+          </Btn>
+          <Btn
+            onClick={() => {
+              setError("");
+              setInvite({ email: "" });
+            }}
+          >
+            INVITE USER
+          </Btn>
+        </div>
       </div>
       <Panel
         title="Manage portal access"
         extra={
-          <button
-            className="link"
-            onClick={() => refresh().catch((error) => setError(error.message))}
-          >
+          <Btn tone="secondary" onClick={() => refresh()}>
             Refresh
-          </button>
+          </Btn>
         }
       >
         <p>
@@ -126,13 +158,19 @@ export function UserAccess() {
                 onClick={() => setTab(value)}
               >
                 {label} (
-                {
+                {loading ? (
+                  <Skeleton
+                    width="18px"
+                    height="12px"
+                    className="access-count-skeleton"
+                  />
+                ) : (
                   users.filter((item) =>
                     value === "onboarded"
                       ? item.accessStatus === "onboarded"
                       : item.accessStatus !== "onboarded",
                   ).length
-                }
+                )}
                 )
               </button>
             ))}
@@ -146,7 +184,10 @@ export function UserAccess() {
           />
         </div>
         {loading ? (
-          <p role="status">Loading users…</p>
+          <TableSkeleton
+            columns={tab === "onboarded" ? 7 : 6}
+            label="Loading user accounts"
+          />
         ) : (
           <Table
             count={filtered.length}
@@ -201,7 +242,7 @@ export function UserAccess() {
                         role="switch"
                         aria-checked={item.isEnabled}
                         aria-label={`Access for ${item.email}`}
-                        disabled={item.id === user.id}
+                        disabled={item.id === user.id || actionBusy === item.id}
                         title={
                           item.id === user.id
                             ? "You cannot deactivate your own account"
@@ -221,6 +262,7 @@ export function UserAccess() {
                         }}
                       >
                         <span />
+                        {actionBusy === item.id && <Spinner />}
                         {item.isEnabled ? "Active" : "Inactive"}
                       </button>
                     </td>
@@ -279,6 +321,16 @@ export function UserAccess() {
           </Table>
         )}
       </Panel>
+      {bulkInvite && (
+        <BulkInviteDialog
+          users={users}
+          onClose={() => setBulkInvite(false)}
+          onComplete={async () => {
+            setTab("invited");
+            await refresh(false);
+          }}
+        />
+      )}
       {invite && (
         <Modal
           title="Invite a user"
@@ -325,8 +377,8 @@ export function UserAccess() {
               >
                 CANCEL
               </Btn>
-              <Btn type="submit" disabled={busy}>
-                {busy ? "SENDING…" : "SEND INVITATION"}
+              <Btn type="submit" loading={busy}>
+                SEND INVITATION
               </Btn>
             </div>
           </form>
@@ -462,7 +514,7 @@ export function MyProfile() {
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
-            <Btn type="submit" disabled={busy}>
+            <Btn type="submit" loading={busy}>
               SAVE NAME
             </Btn>
             <Btn type="button" tone="secondary" onClick={() => go("access")}>
@@ -599,7 +651,7 @@ export function MyProfile() {
               >
                 CANCEL
               </Btn>
-              <Btn type="submit" disabled={busy}>
+              <Btn type="submit" loading={busy}>
                 SUBMIT AMENDMENT
               </Btn>
             </div>

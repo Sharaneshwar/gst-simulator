@@ -1,3 +1,12 @@
+import { Spinner } from "./loading";
+export {
+  Spinner,
+  Skeleton,
+  InlineLoader,
+  TableSkeleton,
+  PageSkeleton,
+  RequestProgress,
+} from "./loading";
 import { Dropdown } from "./dropdown";
 export { Dropdown } from "./dropdown";
 import { useEffect, useRef, useState } from "react";
@@ -114,13 +123,21 @@ export const REG_TABS = [
   ["aadhaar", "Aadhaar Authentication"],
   ["verification", "Verification"],
 ];
-export function Btn({ children, tone = "primary", onClick, ...props }) {
+export function Btn({
+  children,
+  tone = "primary",
+  onClick,
+  loading = false,
+  ...props
+}) {
   const [busy, setBusy] = useState(false);
   const ctx = usePortal();
+  const pending = busy || loading;
   return (
     <button
       {...props}
-      disabled={busy || props.disabled}
+      disabled={pending || props.disabled}
+      aria-busy={pending || undefined}
       className={`btn ${tone} ${props.className || ""}`}
       onClick={
         onClick
@@ -138,7 +155,8 @@ export function Btn({ children, tone = "primary", onClick, ...props }) {
           : undefined
       }
     >
-      {busy ? "PLEASE WAIT…" : children}
+      {pending && <Spinner />}
+      {children}
     </button>
   );
 }

@@ -139,3 +139,86 @@
     flex-wrap: wrap;
   }
 }
+.access-count-skeleton {
+  display: inline-block !important;
+  vertical-align: middle;
+  margin: 0 3px;
+}
+.bulk-invite-form textarea {
+  width: 100%;
+  padding: 12px;
+  font: inherit;
+  line-height: 1.6;
+  resize: vertical;
+  min-height: 150px;
+  height: auto;
+  border: 1px solid #b6bec9;
+  border-radius: 3px;
+}
+.bulk-results {
+  max-height: 340px;
+  overflow: auto;
+  margin-top: 20px;
+}
+.bulk-results td {
+  overflow-wrap: anywhere;
+}
+.bulk-status {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-weight: 600;
+}
+.bulk-status.sent {
+  color: #1d723e;
+}
+.bulk-status.delivery_failed,
+.bulk-status.invalid,
+.bulk-status.failed,
+.bulk-status.unconfirmed,
+.bulk-error {
+  color: #af2929;
+}
+.bulk-progress {
+  background: #f0f4f9;
+  padding: 18px;
+  border: 1px solid #dbe3ed;
+}
+.bulk-progress > div {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.bulk-progress progress {
+  width: 100%;
+  height: 12px;
+  margin-top: 14px;
+  accent-color: #3b5485;
+}
+.bulk-progress p {
+  margin-bottom: 0;
+}
+.bulk-invite-form .actions {
+  position: sticky;
+  bottom: -1px;
+  background: #fff;
+  padding-top: 18px;
+  padding-bottom: 8px;
+  margin-top: 20px;
+}
+.bulk-invite-form .field {
+  margin-top: 0;
+}
+.bulk-results .table-scroll table {
+  min-width: 0;
+  table-layout: fixed;
+}
+.bulk-results th:first-child {
+  width: 58%;
+}
+.bulk-results th {
+  white-space: normal;
+}
+.bulk-results td {
+  white-space: normal;
+}

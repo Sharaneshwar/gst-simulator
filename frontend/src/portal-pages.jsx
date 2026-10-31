@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Btn,
+  InlineLoader,
   Crumbs,
   Field,
   Input,
@@ -287,8 +288,9 @@ export function Login() {
             aria-live="polite"
           >
             {access.email === normalizedEmail &&
-              access.status === "checking" &&
-              "Checking access…"}
+              access.status === "checking" && (
+                <InlineLoader label="Checking account access" />
+              )}
             {access.email === normalizedEmail &&
               access.status === "denied" &&
               "This email is incorrect or does not have access to the application."}
@@ -315,8 +317,8 @@ export function Login() {
             placeholder="Enter Password"
             onChange={(e) => setPassword(e.target.value)}
           />
-          <Btn type="submit" disabled={busy || !permitted || !password}>
-            {busy ? "LOGGING IN…" : "LOGIN"}
+          <Btn type="submit" loading={busy} disabled={!permitted || !password}>
+            LOGIN
           </Btn>
           <div className="login-recovery">
             <button type="button" onClick={() => go("help/access")}>

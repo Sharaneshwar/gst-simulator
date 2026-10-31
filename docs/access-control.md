@@ -4,22 +4,22 @@ Instructors manage accounts from the profile menu → **User Access**. Access is
 
 - **Onboarded** lists retained accounts and people who have signed in, with role, first/last access (IST), and an active/inactive switch. Active accounts are listed first. The current instructor cannot deactivate themself; the last active instructor is protected.
 - **Invited** lists pending, failed, expired and revoked invitations. Invitations expire after 48 hours. Resending is available after 60 seconds, generates a replacement password, and invalidates the previous invitation password. Revoking prevents first login.
-- The invitation form accepts only a student email. The API retains instructor-role invitations for existing administrative integrations, but accepts no business identity from invitation inputs. New student accounts have no company until completing registration.
+- Single invitations accept a student email. **Bulk Invite** accepts up to 100 addresses with preview, progress and per-recipient results; see [bulk-invitations.md](bulk-invitations.md). The API retains instructor-role invitations for existing administrative integrations, but accepts no business identity from invitation inputs. New student accounts have no company until completing registration.
 - Students can practise multiple registrations and switch between their own completed businesses. Each business retains separate return periods and saved work; other accounts' businesses are rejected by the server. Existing business records remain available.
 - Students cannot rename a business through the personal-profile endpoint. My Profile → **Amend Business Name** submits a core-field amendment, without changing PAN/GSTIN. An instructor reviews it in User Access → View. This is a training approval, not a GSTN submission. Approved names survive a practice-data reset; existing workspace periods are retained.
 - Instructor display names can be edited in My Profile. Role and login email cannot be changed through that form.
 
 ## Email and sessions
 
-Invitation email uses the existing `SMTP_USER` / `SMTP_PASS` configuration, optional `SMTP_HOST` / `SMTP_PORT`, sender name **GST Simulator**, and the first `FRONTEND_ORIGIN` for the login link. No new mailbox or live invitations are required for the automated tests. The email-OTP implementation remains separate.
+Invitation email uses the configured transport (Brevo HTTPS on Render, or SMTP where supported), sender name **GST Simulator**, and the first `FRONTEND_ORIGIN` for the login link. No new mailbox or live invitations are required for the automated tests. The email-OTP implementation remains separate.
 
-New invitation passwords remain six letters, as requested, and are stored with salted scrypt hashes. Passwords are only delivered by email, not returned by account APIs. Existing demo accounts are retained, but their credentials are no longer advertised or prefilled on public screens. Startup no longer resets names/passwords or deletes non-demo users.
+New invitation passwords remain six letters, as requested, and are stored with salted scrypt hashes. Passwords are only delivered by email, not returned by account APIs. Existing accounts persist across startup. Production does not automatically create demo accounts, reset names/passwords or delete invited users.
 
-Deactivation invalidates all sessions immediately at the API. Reactivation requires a fresh login. An idle open page checks its session every minute. First access is set once, on successful login; last access updates at login and at most once per minute during authenticated use.
+Login tokens last 12 hours and are stored in local storage. Browser restarts preserve them until expiry or revocation; clearing site data removes them. Clearing cookies alone does not necessarily clear local storage. Deactivation invalidates all sessions immediately at the API. Reactivation requires a fresh login. An idle open page checks its session every minute. First access is set once, on successful login; last access updates at login and at most once per minute during authenticated use.
 
-Set a strong, private, persistent `TOKEN_SECRET` (at least 32 random bytes) in the hosting environment. If omitted, a random process-local key is used rather than a public hard-coded key; sessions then end when the server restarts. Never commit SMTP credentials or secret keys. Keep the SQLite database on a persistent disk in deployment.
+Set a strong, private, persistent `TOKEN_SECRET` (at least 32 random bytes) in the hosting environment. If omitted, a random process-local key is used rather than a public hard-coded key; sessions then end when the server restarts. Never commit SMTP credentials or secret keys. Production data is stored in Neon PostgreSQL; SQLite is an explicit isolated local/test option.
 
-The requested public email access check intentionally reveals whether an email can access the portal. It is throttled, but is not an account-enumeration-resistant design. Six-letter passwords and retained demo credentials are also deliberate demo-stage compromises, not a claim of production-grade authentication.
+The requested public email access check intentionally reveals whether an email can access the portal. It is throttled, but is not an account-enumeration-resistant design. Generated six-letter invitation passwords retain the existing training-account behavior.
 
 ## Local verification
 

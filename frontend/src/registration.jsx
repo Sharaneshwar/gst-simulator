@@ -1038,11 +1038,7 @@ export function TrackApplication() {
                         }
                       }}
                     >
-                      {opening === item.reference
-                        ? "OPENING…"
-                        : item.arn
-                          ? "VIEW"
-                          : "CONTINUE"}
+                      {item.arn ? "VIEW" : "CONTINUE"}
                     </Btn>
                   </td>
                 </tr>

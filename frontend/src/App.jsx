@@ -6,7 +6,13 @@ import {
   NilSupplies,
 } from "./workflows";
 import { useEffect, useRef, useState } from "react";
-import { PortalContext, Panel } from "./lib";
+import {
+  PortalContext,
+  Panel,
+  PageSkeleton,
+  RequestProgress,
+  Skeleton,
+} from "./lib";
 import {
   Home,
   Login,
@@ -45,7 +51,7 @@ const currentRoute = () =>
   decodeURIComponent(window.location.hash.slice(2) || "home");
 
 function Shell({ children, ctx }) {
-  const { user, active, route, go, logout } = ctx;
+  const { user, active, route, go, logout, loading, pending } = ctx;
   const [menu, setMenu] = useState("");
   const [mobile, setMobile] = useState(false);
   const navRef = useRef(null);
@@ -137,6 +143,7 @@ function Shell({ children, ctx }) {
   if (route.split("/")[0] === "eway")
     return (
       <div className="eway-site">
+        {pending > 0 && <RequestProgress />}
         <main id="main-content">{children}</main>
         <footer className="eway-footer">
           <span>GST Practice Portal</span>
@@ -150,6 +157,7 @@ function Shell({ children, ctx }) {
       className={`site ${contrast ? "high-contrast" : ""}`}
       style={{ "--base-font": `${fontSize}px` }}
     >
+      {pending > 0 && <RequestProgress />}
       <div className="utility-bar">
         <div className="container">
           <button
@@ -186,7 +194,9 @@ function Shell({ children, ctx }) {
             </span>
           </button>
           <div className="account-links">
-            {user ? (
+            {loading ? (
+              <Skeleton className="account-skeleton" height="36px" />
+            ) : user ? (
               <>
                 <button
                   onClick={() => setMenu(menu === "profile" ? "" : "profile")}
@@ -378,6 +388,7 @@ export default function App() {
   );
   const [portal, setPortal] = useState(null);
   const [loading, setLoading] = useState(Boolean(token));
+  const [pending, setPending] = useState(0);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [intended, setIntended] = useState("dashboard");
@@ -385,33 +396,43 @@ export default function App() {
     active = portal?.activeCase,
     w = active?.state.workspace,
     p = w?.periods[w.period];
-  async function api(path, body, authToken = token) {
-    const res = await fetch(API_BASE + path, {
-      method: body === undefined ? "GET" : "POST",
-      headers: {
-        ...(await networkHeaders()),
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    const data = await res
-      .json()
-      .catch(() => ({ message: "The server returned an invalid response." }));
-    if (!res.ok) {
-      if (data.code === "NETWORK_ACCESS_REQUIRED") window.location.reload();
-      if (
-        authToken &&
-        ["ACCOUNT_DISABLED", "SESSION_REVOKED"].includes(data.code)
-      ) {
-        localStorage.removeItem("gstPortalToken");
-        setToken("");
-        setPortal(null);
-        window.location.hash = "/login";
+  async function api(
+    path,
+    body,
+    authToken = token,
+    { background = false } = {},
+  ) {
+    if (!background) setPending((value) => value + 1);
+    try {
+      const res = await fetch(API_BASE + path, {
+        method: body === undefined ? "GET" : "POST",
+        headers: {
+          ...(await networkHeaders()),
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      const data = await res
+        .json()
+        .catch(() => ({ message: "The server returned an invalid response." }));
+      if (!res.ok) {
+        if (data.code === "NETWORK_ACCESS_REQUIRED") window.location.reload();
+        if (
+          authToken &&
+          ["ACCOUNT_DISABLED", "SESSION_REVOKED"].includes(data.code)
+        ) {
+          localStorage.removeItem("gstPortalToken");
+          setToken("");
+          setPortal(null);
+          window.location.hash = "/login";
+        }
+        throw new Error(data.message || "Unable to complete the request.");
       }
-      throw new Error(data.message || "Unable to complete the request.");
+      return data;
+    } finally {
+      if (!background) setPending((value) => Math.max(0, value - 1));
     }
-    return data;
   }
   async function load(authToken = token) {
     const data = await api("/portal", undefined, authToken);
@@ -465,7 +486,11 @@ export default function App() {
   useEffect(() => {
     if (!token) return;
     // Idle pages discover access revocation within a minute; every API request checks it immediately.
-    const timer = setInterval(() => api("/auth/me").catch(() => {}), 60000);
+    const timer = setInterval(
+      () =>
+        api("/auth/me", undefined, token, { background: true }).catch(() => {}),
+      60000,
+    );
     return () => clearInterval(timer);
   }, [token]);
   useEffect(() => {
@@ -514,6 +539,8 @@ export default function App() {
   const ctx = {
     route,
     token,
+    loading,
+    pending,
     portal,
     user,
     active,
@@ -532,12 +559,7 @@ export default function App() {
   };
   const parts = route.split("/");
   let content;
-  if (loading)
-    content = (
-      <div className="container page-space">
-        <Panel title="Loading">Opening the portal…</Panel>
-      </div>
-    );
+  if (loading) content = <PageSkeleton />;
   else if (!user && !publicRoutes.includes(parts[0])) content = <Login />;
   else if (
     user?.registrationRequired &&
