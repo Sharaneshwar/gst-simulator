@@ -316,6 +316,13 @@ export function Modal({ title, children, onClose, wide = false }) {
     ref.current.showModal();
     return () => ref.current?.close();
   }, []);
+  useEffect(() => {
+    if (error && ref.current?.open) {
+      const message = ref.current.querySelector(".modal-error");
+      message?.focus({ preventScroll: true });
+      message?.scrollIntoView({ block: "nearest" });
+    }
+  }, [error]);
   return (
     <dialog
       ref={ref}
@@ -336,7 +343,7 @@ export function Modal({ title, children, onClose, wide = false }) {
       </div>
       <div className="modal-body">
         {error && (
-          <div className="modal-error" role="alert">
+          <div className="modal-error" role="alert" tabIndex={-1}>
             {error}
           </div>
         )}
@@ -421,8 +428,19 @@ export function Signing({ title, purpose, onSubmit, onClose }) {
         onChange={(e) => setForm({ ...form, email: e.target.value })}
         help="The verification code will be sent to this email address."
       />
+      {!delivery && (!form.declaration || !form.signatory || !form.email) && (
+        <p className="muted" id="signing-requirement" role="status">
+          Select the declaration and authorized signatory, and enter an email
+          address to enable SEND OTP.
+        </p>
+      )}
       {!delivery ? (
         <Btn
+          aria-describedby={
+            !form.declaration || !form.signatory || !form.email
+              ? "signing-requirement"
+              : undefined
+          }
           disabled={!form.declaration || !form.signatory || !form.email}
           onClick={send}
         >
@@ -444,12 +462,20 @@ export function Signing({ title, purpose, onSubmit, onClose }) {
             maxLength={6}
           />
           <OtpResend delivery={delivery} onResend={send} />
+          {form.otp.length !== 6 && (
+            <p className="muted" id="signing-otp-requirement" role="status">
+              Enter the six-digit email OTP to enable VERIFY & FILE.
+            </p>
+          )}
           <div className="actions">
             <Btn tone="secondary" onClick={onClose}>
               CANCEL
             </Btn>
             <Btn
               disabled={!form.declaration || form.otp.length !== 6}
+              aria-describedby={
+                form.otp.length !== 6 ? "signing-otp-requirement" : undefined
+              }
               onClick={async () => {
                 await onSubmit(form);
                 onClose();

@@ -4,7 +4,8 @@
   "scripts": {
     "build": "npm --prefix frontend run build",
     "test": "npm --prefix backend test",
-    "start": "npm --prefix backend start"
+    "start": "npm --prefix backend start",
+    "test:frontend": "npm --prefix frontend test"
   },
   "dependencies": {
     "@neon/config": "^1.9.3",

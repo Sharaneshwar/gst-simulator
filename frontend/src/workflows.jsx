@@ -70,6 +70,19 @@ export function OfflineReturn({ type = "GSTR-1" }) {
             ? "Upload your GSTR-3B utility JSON, then verify each table before proceeding to payment."
             : "Upload GSTR-1 utility JSON or invoice-template JSON. Review the processed records and error report before filing."}
         </p>
+        {locked && (
+          <p className="info" id="offline-upload-requirement" role="status">
+            {type} is locked because it has been{" "}
+            {three && p.gstr3b.status === "Offset" ? "offset" : "filed"}.
+            Uploads cannot change this return. Select another return period to
+            enter new records.
+          </p>
+        )}
+        {!locked && !file && (
+          <p className="muted" id="offline-upload-requirement">
+            Select a JSON file to enable UPLOAD.
+          </p>
+        )}
         <Input
           label="Select JSON file"
           type="file"
@@ -85,6 +98,9 @@ export function OfflineReturn({ type = "GSTR-1" }) {
           </Btn>
           <Btn
             disabled={!file || locked}
+            aria-describedby={
+              !file || locked ? "offline-upload-requirement" : undefined
+            }
             onClick={async () => {
               if (file.size > 6000000)
                 throw Error("Select a file smaller than 6 MB.");
@@ -957,6 +973,12 @@ export function NilSupplies() {
       <h1>8A, 8B, 8C, 8D — Nil Rated Supplies</h1>
       <TaxpayerBar />
       <Panel title="Nil Rated, Exempted and Non-GST Supplies">
+        {locked && (
+          <p className="info">
+            These records are read-only because GSTR-1 for this period or
+            quarter has already been filed.
+          </p>
+        )}
         <div className="table-scroll">
           <table className="editable-table">
             <thead>

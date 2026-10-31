@@ -201,6 +201,8 @@ export function Gstr1() {
   const { p, w, go, mutate } = usePortal();
   const returnInvoices = w.gstr1Invoices || p.invoices;
   const isIff = w.returnInfo?.isIff;
+  const summaryNeedsUpdate =
+    !p.gstr1.summary || p.gstr1.summaryRevision !== p.gstr1.revision;
   const [amendments, setAmendments] = useState(false);
   const [preview, setPreview] = useState(false);
   const [signing, setSigning] = useState(false);
@@ -243,6 +245,12 @@ export function Gstr1() {
             />
             File Nil GSTR-1 (no outward supplies in this period)
           </label>
+          {returnInvoices.length > 0 && (
+            <p className="muted">
+              Nil filing is unavailable because this period contains outward
+              supply records.
+            </p>
+          )}
         </Panel>
       )}
       <div className="tabs">
@@ -293,6 +301,13 @@ export function Gstr1() {
           </p>
         </Panel>
       )}
+      {p.gstr1.status !== "Filed" && summaryNeedsUpdate && (
+        <p className="info" id="gstr1-filing-requirement" role="status">
+          {p.gstr1.summary
+            ? "Your summary is out of date. Select GENERATE SUMMARY again after editing records to enable filing."
+            : "Select GENERATE SUMMARY to enable PROCEED TO FILE / SUMMARY."}
+        </p>
+      )}
       <div className="actions">
         <Btn tone="secondary" onClick={() => go("returns")}>
           BACK
@@ -304,8 +319,9 @@ export function Gstr1() {
           <>
             <Btn onClick={() => mutate("gstr1/summary")}>GENERATE SUMMARY</Btn>
             <Btn
-              disabled={
-                !p.gstr1.summary || p.gstr1.summaryRevision !== p.gstr1.revision
+              disabled={summaryNeedsUpdate}
+              aria-describedby={
+                summaryNeedsUpdate ? "gstr1-filing-requirement" : undefined
               }
               onClick={() => setSigning(true)}
             >
@@ -1028,6 +1044,23 @@ export function Gstr3b() {
       )}
       {payment || locked ? (
         <Panel title="6.1 — Payment of Tax">
+          {!locked && p.gstr1.status !== "Filed" && (
+            <div className="info" role="status">
+              <p>
+                File GSTR-1 for this period before making the GSTR-3B payment.
+              </p>
+              <Btn tone="secondary" onClick={() => go("gstr1")}>
+                OPEN GSTR-1
+              </Btn>
+            </div>
+          )}
+          {!locked && total(plan.shortfall) > 0 && (
+            <p className="info">
+              Additional cash required: ₹ {money(total(plan.shortfall))}. Create
+              and pay a challan for the shortfall, then return here to make
+              payment.
+            </p>
+          )}
           <HeadTable
             rows={[
               ["Tax liability", plan.liability],
@@ -1100,6 +1133,11 @@ export function Gstr3b() {
           ))}
         </div>
       )}
+      {!locked && !payment && !p.gstr3b.saved && (
+        <p className="info" id="gstr3b-payment-requirement" role="status">
+          Select SAVE GSTR-3B to enable PROCEED TO PAYMENT.
+        </p>
+      )}
       <div className="actions">
         <Btn tone="secondary" onClick={() => go("returns")}>
           BACK
@@ -1112,7 +1150,13 @@ export function Gstr3b() {
             <Btn onClick={() => mutate("gstr3b/save", { nil })}>
               SAVE GSTR-3B
             </Btn>
-            <Btn disabled={!p.gstr3b.saved} onClick={() => setPayment(true)}>
+            <Btn
+              disabled={!p.gstr3b.saved}
+              aria-describedby={
+                !p.gstr3b.saved ? "gstr3b-payment-requirement" : undefined
+              }
+              onClick={() => setPayment(true)}
+            >
               PROCEED TO PAYMENT
             </Btn>
           </>
@@ -1487,6 +1531,20 @@ export function Challans() {
               )}
             </>
           )}
+          {selected.status !== "Paid" &&
+            (!bank || !terms || (bankStep && !bankOtp)) && (
+              <p
+                className="info"
+                id="challan-payment-requirement"
+                role="status"
+              >
+                {!bank
+                  ? "Select a bank to continue."
+                  : !terms
+                    ? "Accept the terms and conditions to continue."
+                    : "Select CONFIRM PAYMENT to receive the payment OTP."}
+              </p>
+            )}
           <div className="actions">
             <Btn tone="secondary" onClick={() => window.print()}>
               PRINT
@@ -1494,6 +1552,11 @@ export function Challans() {
             {selected.status !== "Paid" && (
               <Btn
                 disabled={!bank || !terms || (bankStep && !bankOtp)}
+                aria-describedby={
+                  !bank || !terms || (bankStep && !bankOtp)
+                    ? "challan-payment-requirement"
+                    : undefined
+                }
                 onClick={async () => {
                   if (!bankStep) {
                     setBankStep(true);
