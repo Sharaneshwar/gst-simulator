@@ -2,7 +2,7 @@
 
 The production website permits the configured home public IP and individually approved browsers. VPN IP addresses are not allowlisted. App login is still required after the network check.
 
-A browser can request approval, but cannot approve itself. Approval/revocation is available only through the private server operator tool, with database credentials. A student or an instructor using the app's demo login cannot grant browser exceptions.
+Unauthorized visitors receive a generic HTTP 403 blocked page, without network details or enrollment controls. The browser-access page and enrollment endpoint are restricted to the allowed home network or an already-approved browser. A browser on an allowed connection can request approval, but cannot approve itself. Approval/revocation is available only through the private server operator tool, with database credentials. A student or an instructor using the app's demo login cannot grant browser exceptions.
 
 ## Production configuration
 
@@ -23,7 +23,7 @@ Render rejects app API calls without a valid network grant. Its health endpoint 
 
 ## Approve or revoke a browser
 
-1. In the browser that needs access, open the website, enter a recognizable browser name, and choose **Request browser access**. On the allowed home network, use **Browser access** in the footer (or `/api/network?action=page`) to request an exception before travelling.
+1. On the allowed home network, use **Browser access** in the footer (or `/api/network?action=page`), enter a recognizable browser name, and choose **Request browser access** before travelling.
 2. Review its request ID and label through the private operator command below.
 3. Approve the exact request ID, then select **Check access** in that browser.
 

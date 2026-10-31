@@ -46,7 +46,11 @@ const page = (ip, cookie = "") =>
     new Request(edgeUrl + "/", { headers: { "x-real-ip": ip, cookie } }),
   );
 test("middleware gates unknown browsers and private assets, while home network passes", async () => {
-  assert.equal((await page("203.0.113.2")).status, 403);
+  const deniedPage = await page("203.0.113.2");
+  assert.equal(deniedPage.status, 403);
+  const deniedHtml = await deniedPage.text();
+  assert.match(deniedHtml, /Sorry, you have been blocked/);
+  assert.doesNotMatch(deniedHtml, /Network access required|Request browser access|Check access|<script|<input/);
   const asset = await middleware(
     new Request(edgeUrl + "/assets/app.js", {
       headers: { "x-real-ip": "203.0.113.2" },
@@ -71,11 +75,11 @@ test("same-origin gateway sets private cookies, never approves requests, and rej
     status(code) { this.code = code; return this; },
     send(body) { this.body = body; return this; },
   };
-  await handler({ method: "GET", query: { action: "page" } }, vercelResponse);
+  await handler({ method: "GET", query: { action: "page" }, url: "/api/network?action=page", headers: { host: new URL(edgeUrl).host, "x-real-ip": "203.0.113.10" } }, vercelResponse);
   assert.equal(vercelResponse.code, 200);
   assert.match(vercelResponse.headers["Content-Type"], /text\/html/);
   assert.match(vercelResponse.body, /Request browser access/);
-  const management = await fetch(edgeUrl + "/api/network?action=page");
+  const management = await fetch(edgeUrl + "/api/network?action=page", { headers: { "x-real-ip": "203.0.113.10" } });
   assert.equal(management.status, 200);
   assert.match(management.headers.get("content-type"), /text\/html/);
   const html = await management.text();
@@ -96,7 +100,7 @@ test("same-origin gateway sets private cookies, never approves requests, and rej
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-real-ip": "203.0.113.2",
+      "x-real-ip": "203.0.113.10",
       origin: edgeUrl.replace("http:", "https:"),
     },
     body: JSON.stringify({ label: "Test browser" }),
@@ -105,7 +109,8 @@ test("same-origin gateway sets private cookies, never approves requests, and rej
   cookie = enrolled.headers.get("set-cookie").split(";")[0];
   const data = await enrolled.json();
   id = data.requestId;
-  assert.equal(data.allowed, false);
+  assert.equal(data.allowed, true);
+  assert.equal(data.status, "pending");
   assert.equal((await page("203.0.113.2", cookie)).status, 403);
 });
 test("approved browser passes middleware on a different IP; revocation immediately blocks it", async () => {
@@ -124,4 +129,25 @@ test("approved browser passes middleware on a different IP; revocation immediate
     .prepare("UPDATE network_devices SET status='revoked' WHERE id=?")
     .run(id);
   assert.equal((await page("198.51.100.42", cookie)).status, 403);
+});
+
+test("outsiders cannot open enrollment, create pending requests, or inspect browser status", async () => {
+  const beforeCount = (await db.prepare("SELECT COUNT(*) AS count FROM network_devices").get()).count;
+  for (const action of ["page", "session", "enroll"]) {
+    const response = await fetch(edgeUrl + "/api/network?action=" + action, {
+      method: action === "enroll" ? "POST" : "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "x-real-ip": "203.0.113.2",
+        origin: edgeUrl.replace("http:", "https:"),
+      },
+      ...(action === "enroll" ? { body: JSON.stringify({ label: "Outsider" }) } : {}),
+    });
+    assert.equal(response.status, 403);
+    const body = await response.text();
+    assert.doesNotMatch(body, /Request browser access|requestId|grant|home network|NETWORK_ACCESS/);
+    if (action === "page") assert.match(body, /Sorry, you have been blocked/);
+    else assert.deepEqual(JSON.parse(body), { message: "Access blocked." });
+  }
+  assert.equal((await db.prepare("SELECT COUNT(*) AS count FROM network_devices").get()).count, beforeCount);
 });

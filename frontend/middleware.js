@@ -1,5 +1,5 @@
 import { next, ipAddress } from "@vercel/functions";
-import { accessPage } from "./network/page.js";
+import { blockedPage, blockedHeaders } from "./network/blocked-page.js";
 export const config = { runtime: "nodejs" };
 export default async function middleware(request) {
   if (process.env.NETWORK_ACCESS_ENABLED !== "1") return next();
@@ -31,18 +31,8 @@ export default async function middleware(request) {
       if (response.ok && (await response.json()).allowed === true)
         return next();
     } catch {
-      /* Fail closed, while keeping enrollment/status available. */
+      /* Fail closed. The same-origin function checks access separately. */
     }
   }
-  return new Response(accessPage(), {
-    status: 403,
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "private, no-store",
-      "X-Content-Type-Options": "nosniff",
-      "Referrer-Policy": "no-referrer",
-      "Content-Security-Policy":
-        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
-    },
-  });
+  return new Response(blockedPage(), { status: 403, headers: blockedHeaders });
 }
