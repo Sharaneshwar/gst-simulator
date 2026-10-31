@@ -4,8 +4,8 @@ Instructors manage accounts from the profile menu → **User Access**. Access is
 
 - **Onboarded** lists retained accounts and people who have signed in, with role, first/last access (IST), and an active/inactive switch. Active accounts are listed first. The current instructor cannot deactivate themself; the last active instructor is protected.
 - **Invited** lists pending, failed, expired and revoked invitations. Invitations expire after 48 hours. Resending is available after 60 seconds, generates a replacement password, and invalidates the previous invitation password. Revoking prevents first login.
-- Invite either **Student** or **Instructor**. Email is the unique login identifier. Student invitations collect legal business name, optional trade name, and optional dummy GSTIN. A repeated dummy GSTIN is allowed; accounts still own separate SQLite records.
-- A student has one fixed business, with the existing supported returns, periods, invoices, ledgers and documents under that business. Switching to another business is rejected by the server. Instructors retain their separate practice businesses.
+- The invitation form accepts only a student email. The API retains instructor-role invitations for existing administrative integrations, but accepts no business identity from invitation inputs. New student accounts have no company until completing registration.
+- Students can practise multiple registrations and switch between their own completed businesses. Each business retains separate return periods and saved work; other accounts' businesses are rejected by the server. Existing business records remain available.
 - Students cannot rename a business through the personal-profile endpoint. My Profile → **Amend Business Name** submits a core-field amendment, without changing PAN/GSTIN. An instructor reviews it in User Access → View. This is a training approval, not a GSTN submission. Approved names survive a practice-data reset; existing workspace periods are retained.
 - Instructor display names can be edited in My Profile. Role and login email cannot be changed through that form.
 
@@ -23,6 +23,6 @@ The requested public email access check intentionally reveals whether an email c
 
 ## Local verification
 
-Run `npm test` from `backend` and `npm run build` from `frontend`. Access tests create temporary SQLite databases and mock email delivery. They cover permissions, both invitation roles, duplicate dummy GSTINs, expiry/revocation/resending, failed delivery, access/session revocation, fixed student businesses, core-field approval and startup persistence.
+Run `npm test` from `backend` and `npm run build` from `frontend`. Access tests create temporary SQLite databases and mock email delivery. They cover permissions, both invitation roles, duplicate dummy GSTINs, expiry/revocation/resending, failed delivery, access/session revocation, account-owned business workspaces, core-field approval and startup persistence.
 
-No migration deletes old practice-case data. Existing student accounts bind to their previously active business; any other prior business states remain in SQLite but are no longer selectable by that student.
+No migration deletes old practice-case data. Existing student accounts retain their previously active business. New registrations add private workspaces. See [registration-practice.md](registration-practice.md) for application history and input defaults.

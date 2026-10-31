@@ -1,3 +1,6 @@
+import { RateSelect } from "./rate-guide";
+import { HsnSearch } from "./hsn-search";
+import { Interstate3b, InvoiceExtraFields } from "./workflows";
 import { useEffect, useState } from "react";
 import {
   Btn,
@@ -25,7 +28,7 @@ import {
 } from "./lib";
 
 export function ReturnsDashboard() {
-  const { w, p, mutate, go } = usePortal();
+  const { w, p, mutate, go, setError } = usePortal();
   const initialYear =
     Number(w.period.slice(0, 4)) - (Number(w.period.slice(5)) < 4 ? 1 : 0);
   const [year, setYear] = useState(initialYear);
@@ -38,17 +41,29 @@ export function ReturnsDashboard() {
     { length: 3 },
     (_, i) => (((quarter - 1) * 3 + i + 3) % 12) + 1,
   );
+  const isIff = w.returnInfo?.isIff,
+    qrmp = w.filingFrequency === "QRMP";
   const tiles = [
     [
       "Details of outward supplies of goods or services",
-      "GSTR-1",
+      isIff ? "IFF" : "GSTR-1",
       p.gstr1.status,
       "gstr1",
       "offline",
     ],
     ["Auto Drafted Details (For view only)", "GSTR-2A", "Available", "gstr2a"],
     ["Auto-drafted ITC Statement", "GSTR-2B", "Available", "gstr2b"],
-    ["Monthly Return", "GSTR-3B", p.gstr3b.status, "gstr3b"],
+    ...(!isIff
+      ? [
+          [
+            qrmp ? "Quarterly Return" : "Monthly Return",
+            "GSTR-3B",
+            p.gstr3b.status,
+            "gstr3b",
+            "offline3b",
+          ],
+        ]
+      : []),
   ];
   return (
     <div className="container">
@@ -57,9 +72,38 @@ export function ReturnsDashboard() {
         <p>Select the financial year, quarter and return filing period.</p>
         <div className="filter-row">
           <Select
+            label="Return Filing Frequency"
+            value={w.filingFrequency || "Monthly"}
+            options={["Monthly", "QRMP"]}
+            onChange={async (e) => {
+              if (!e.target.value) return;
+              try {
+                await mutate("filing-frequency", {
+                  frequency: e.target.value,
+                  period: `${month < 4 ? year + 1 : year}-${String(month).padStart(2, "0")}`,
+                });
+                setSearched(true);
+              } catch (error) {
+                setError(error.message);
+              }
+            }}
+          />
+        </div>
+        {qrmp && (
+          <p className="info">
+            {isIff
+              ? "IFF is available for B2B invoices and registered notes. Make the monthly payment through PMT-06. GSTR-3B is filed at quarter end."
+              : "Quarter-end GSTR-1 excludes supplies already filed through IFF. GSTR-3B includes the entire quarter."}
+          </p>
+        )}
+        <div className="filter-row">
+          <Select
             label="Financial Year"
             value={year}
-            options={[2025, 2026, 2027].map((y) => [y, `${y}-${y + 1}`])}
+            options={Array.from(
+              { length: Math.max(8, new Date().getFullYear() - 2022 + 3) },
+              (_, i) => 2022 + i,
+            ).map((y) => [y, `${y}-${y + 1}`])}
             onChange={(e) => {
               setYear(Number(e.target.value));
               setSearched(false);
@@ -105,6 +149,11 @@ export function ReturnsDashboard() {
       {searched && (
         <>
           <TaxpayerBar />
+          {isIff && (
+            <div className="actions">
+              <Btn onClick={() => go("challans")}>CREATE PMT-06 CHALLAN</Btn>
+            </div>
+          )}
           <div className="return-tiles">
             {tiles.map(([label, name, status, path, offline]) => (
               <section className="return-card" key={name}>
@@ -150,6 +199,8 @@ export function ReturnsDashboard() {
 
 export function Gstr1() {
   const { p, w, go, mutate } = usePortal();
+  const returnInvoices = w.gstr1Invoices || p.invoices;
+  const isIff = w.returnInfo?.isIff;
   const [amendments, setAmendments] = useState(false);
   const [preview, setPreview] = useState(false);
   const [signing, setSigning] = useState(false);
@@ -158,7 +209,11 @@ export function Gstr1() {
     <div className="container">
       <Crumbs items={[["Returns", "returns"], "GSTR-1"]} />
       <div className="page-title">
-        <h1>GSTR-1 — Details of outward supplies of goods or services</h1>
+        <h1>
+          {isIff
+            ? "IFF — Invoice Furnishing Facility"
+            : "GSTR-1 — Details of outward supplies of goods or services"}
+        </h1>
         <button className="link" onClick={() => go("help")}>
           Help
         </button>
@@ -183,7 +238,7 @@ export function Gstr1() {
             <input
               type="checkbox"
               checked={nil}
-              disabled={p.invoices.length > 0}
+              disabled={returnInvoices.length > 0}
               onChange={(e) => setNil(e.target.checked)}
             />
             File Nil GSTR-1 (no outward supplies in this period)
@@ -205,10 +260,12 @@ export function Gstr1() {
         </button>
       </div>
       <div className="section-tiles">
-        {SECTIONS.filter(([key]) =>
-          amendments ? key.endsWith("A") : !key.endsWith("A"),
+        {SECTIONS.filter(
+          ([key]) =>
+            (amendments ? key.endsWith("A") : !key.endsWith("A")) &&
+            (!isIff || ["B2B", "CDNR", "B2BA", "CDNRA"].includes(key)),
         ).map(([key, code, title]) => {
-          const rows = p.invoices.filter((i) => i.section === key);
+          const rows = returnInvoices.filter((i) => i.section === key);
           return (
             <button
               className="section-tile"
@@ -309,7 +366,10 @@ export function Gstr1Section({ section }) {
       </div>
     );
   const [, code, title] = definition;
-  const locked = p.gstr1.status === "Filed";
+  const locked =
+    p.gstr1.status === "Filed" ||
+    (w.filingFrequency === "QRMP" &&
+      w.periods[w.returnInfo.end]?.gstr1.status === "Filed");
   const rows = p.invoices.filter(
     (i) =>
       i.section === section &&
@@ -333,7 +393,12 @@ export function Gstr1Section({ section }) {
   const registered = ["B2B", "B2BA", "CDNR", "CDNRA"].includes(section);
   const set = (key, value) => setEditing((old) => ({ ...old, [key]: value }));
   const tax = editing
-    ? (Number(editing.taxable || 0) * Number(editing.rate || 0)) / 100
+    ? editing.items?.length
+      ? editing.items.reduce(
+          (n, i) => n + (Number(i.taxable || 0) * Number(i.rate || 0)) / 100,
+          0,
+        )
+      : (Number(editing.taxable || 0) * Number(editing.rate || 0)) / 100
     : 0;
   const interstate =
     editing?.place !== active.state.taxpayer.state || section.startsWith("EXP");
@@ -460,11 +525,33 @@ export function Gstr1Section({ section }) {
               )}
               {section === "HSN" && (
                 <>
-                  <Input
+                  <HsnSearch
                     label="HSN / SAC"
                     required
                     value={editing.hsn}
-                    onChange={(e) => set("hsn", e.target.value)}
+                    onChange={(value) =>
+                      setEditing((old) => ({
+                        ...old,
+                        hsn: value,
+                        hsnDescription: "",
+                      }))
+                    }
+                    onSelect={(record) =>
+                      setEditing((old) => ({
+                        ...old,
+                        hsn: record.code,
+                        hsnDescription: record.description,
+                        number:
+                          !old.number || old.number === `HSN ${old.hsn}`
+                            ? `HSN ${record.code}`
+                            : old.number,
+                      }))
+                    }
+                  />
+                  <Input
+                    label="Description as per HSN / SAC"
+                    value={editing.hsnDescription || ""}
+                    readOnly
                   />
                   <Select
                     label="UQC"
@@ -521,19 +608,19 @@ export function Gstr1Section({ section }) {
                     type="number"
                     step="0.01"
                     min="0"
+                    readOnly={Boolean(editing.items?.length)}
                     value={editing.taxable}
                     onChange={(e) => set("taxable", e.target.value)}
                   />
                   {section !== "NIL" && (
                     <>
-                      <Select
+                      <RateSelect
                         label="Rate (%)"
                         required
                         value={editing.rate}
+                        disabled={Boolean(editing.items?.length)}
+                        date={editing.date}
                         onChange={(e) => set("rate", e.target.value)}
-                        options={[
-                          0, 0.1, 0.25, 1, 1.5, 3, 5, 6, 7.5, 12, 18, 28, 40,
-                        ]}
                       />
                       <Input
                         label="Cess Amount (₹)"
@@ -558,6 +645,11 @@ export function Gstr1Section({ section }) {
                 </label>
               )}
             </div>
+            <InvoiceExtraFields
+              section={section}
+              editing={editing}
+              setEditing={setEditing}
+            />
             {!["NIL", "DOCS", "HSN"].includes(section) && (
               <HeadTable
                 rows={[
@@ -701,208 +793,6 @@ export function Gstr1Section({ section }) {
   );
 }
 
-export function OfflineUpload() {
-  const { w, p, active, mutate, go } = usePortal();
-  const [file, setFile] = useState(null);
-  return (
-    <div className="container">
-      <Crumbs items={[["Returns", "returns"], "GSTR-1 — Prepare Offline"]} />
-      <TaxpayerBar />
-      <Panel title="Upload">
-        <p>Upload the JSON file generated from your returns offline utility.</p>
-        <Input
-          label="Select JSON file"
-          type="file"
-          accept=".json,application/json"
-          onChange={(e) => setFile(e.target.files[0])}
-        />
-        <div className="actions">
-          <Btn
-            tone="secondary"
-            onClick={() =>
-              download("GSTR1-template.json", {
-                gstin: active.state.taxpayer.gstin,
-                fp: w.period.slice(5) + w.period.slice(0, 4),
-                invoices: [
-                  {
-                    section: "B2B",
-                    number: "NEW-001",
-                    date: `${w.period}-15`,
-                    gstin: "29AABCL1234A1Z9",
-                    place: active.state.taxpayer.state,
-                    taxable: 1000,
-                    rate: 18,
-                  },
-                ],
-              })
-            }
-          >
-            DOWNLOAD TEMPLATE
-          </Btn>
-          <Btn
-            disabled={!file || p.gstr1.status === "Filed"}
-            onClick={async () => {
-              if (file.size > 750000)
-                throw new Error("Select a JSON file smaller than 750 KB.");
-              await mutate("upload", {
-                name: file.name,
-                data: await file.text(),
-              });
-              setFile(null);
-            }}
-          >
-            UPLOAD
-          </Btn>
-        </div>
-      </Panel>
-      <Panel title="Upload History">
-        <Table
-          columns={[
-            "File Name",
-            "Uploaded On",
-            "Status",
-            "Processed Records",
-            "Error Report",
-          ]}
-          count={p.uploads.length}
-        >
-          {p.uploads.map((u) => (
-            <tr key={u.id}>
-              <td>{u.name}</td>
-              <td>{dateLabel(u.at)}</td>
-              <td>{u.status}</td>
-              <td>{u.accepted}</td>
-              <td>
-                {u.errors.length ? (
-                  <button
-                    className="link"
-                    onClick={() => download(`${u.name}-errors.json`, u.errors)}
-                  >
-                    Download {u.errors.length} errors ↓
-                  </button>
-                ) : (
-                  "No errors"
-                )}
-              </td>
-            </tr>
-          ))}
-        </Table>
-      </Panel>
-      <div className="actions">
-        <Btn tone="secondary" onClick={() => go("returns")}>
-          BACK
-        </Btn>
-        <Btn onClick={() => go("gstr1")}>VIEW PROCESSED DATA</Btn>
-      </div>
-    </div>
-  );
-}
-
-export function Gstr2({ type }) {
-  const { p, w, active, go } = usePortal();
-  const [tab, setTab] = useState("available");
-  const title = type === "gstr2a" ? "GSTR-2A" : "GSTR-2B";
-  const rows = p.purchases.filter(
-    (i) =>
-      tab === "all" ||
-      (tab === "available" ? i.match === "Matched" : i.match !== "Matched"),
-  );
-  return (
-    <div className="container">
-      <Crumbs items={[["Returns", "returns"], title]} />
-      <h1>
-        {title} —{" "}
-        {type === "gstr2a"
-          ? "Auto Drafted Details"
-          : "Auto-drafted ITC Statement"}
-      </h1>
-      <TaxpayerBar />
-      <div className="info">
-        This statement is for viewing supplier-reported details. Input tax
-        credit is declared in GSTR-3B.
-      </div>
-      <Panel title="ITC Summary">
-        <HeadTable
-          rows={[
-            ["ITC Available", w.eligibleItc],
-            [
-              "ITC requiring review",
-              p.purchases
-                .filter((i) => i.match !== "Matched")
-                .reduce(
-                  (n, i) =>
-                    Object.fromEntries(
-                      HEADS.map((h) => [h, n[h] + i.taxes[h]]),
-                    ),
-                  Object.fromEntries(HEADS.map((h) => [h, 0])),
-                ),
-            ],
-          ]}
-        />
-      </Panel>
-      <div className="tabs">
-        {[
-          ["available", "ITC AVAILABLE"],
-          ["review", "ITC REQUIRING REVIEW"],
-          ["all", "ALL DOCUMENTS"],
-        ].map(([key, label]) => (
-          <button
-            key={key}
-            className={tab === key ? "active" : ""}
-            onClick={() => setTab(key)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-      <Panel title="B2B — Inward Supplies from Registered Persons">
-        <Table
-          columns={[
-            "GSTIN of Supplier",
-            "Trade / Legal Name",
-            "Invoice Number",
-            "Taxable Value (₹)",
-            "Integrated Tax (₹)",
-            "Central Tax (₹)",
-            "State/UT Tax (₹)",
-          ]}
-          count={rows.length}
-        >
-          {rows.map((i) => (
-            <tr key={i.id}>
-              <td>{i.gstin}</td>
-              <td>{i.supplier}</td>
-              <td>{i.number}</td>
-              <td className="number">{money(i.taxable)}</td>
-              {HEADS.slice(0, 3).map((h) => (
-                <td key={h} className="number">
-                  {money(i.taxes[h])}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </Table>
-      </Panel>
-      <div className="actions">
-        <Btn tone="secondary" onClick={() => go("returns")}>
-          BACK
-        </Btn>
-        <Btn
-          onClick={() =>
-            download(`${title}-${w.period}.json`, {
-              gstin: active.state.taxpayer.gstin,
-              period: w.period,
-              documents: p.purchases,
-            })
-          }
-        >
-          DOWNLOAD JSON
-        </Btn>
-      </div>
-    </div>
-  );
-}
-
 const TABLES_3B = [
   ["3.1", "Tax on outward and reverse charge inward supplies"],
   ["3.1.1", "Supplies notified under section 9(5)"],
@@ -963,7 +853,7 @@ const ROWS_3B = {
 function Gstr3bTableEditor({ table, onClose }) {
   const { p, w, mutate } = usePortal();
   const [rows, setRows] = useState(() => {
-    const saved = p.gstr3b.tables[table];
+    const saved = p.gstr3b.tables[table] || w.draft3b?.[table];
     if (saved?.rows) return structuredClone(saved.rows);
     const result = Object.fromEntries(
       ROWS_3B[table].map(([key]) => [
@@ -988,6 +878,7 @@ function Gstr3bTableEditor({ table, onClose }) {
           ? { ...old[key], taxable: value }
           : { ...old[key], taxes: { ...old[key].taxes, [field]: value } },
     }));
+  if (table === "3.2") return <Interstate3b onClose={onClose} />;
   const fields =
     table === "5"
       ? ["igst", "cgst"]
@@ -1079,15 +970,35 @@ export function Gstr3b() {
   const [signing, setSigning] = useState(false);
   const [nil, setNil] = useState(p.gstr3b.nil || false);
   const locked = ["Offset", "Filed"].includes(p.gstr3b.status);
-  const canNil = !p.invoices.length && !p.purchases.length;
+  const canNil =
+    !(w.gstr3bInvoices || p.invoices).length &&
+    !(w.gstr3bPurchases || p.purchases).length &&
+    !Object.values(p.gstr3b.tables).some(
+      (t) => t.taxable > 0 || total(t.taxes) > 0,
+    );
   const plan = p.gstr3b.offset || w.paymentPlan;
+  if (w.returnInfo?.isIff)
+    return (
+      <div className="container">
+        <Panel title="GSTR-3B">
+          <p>
+            GSTR-3B is available at quarter end. Use PMT-06 for the monthly
+            payment.
+          </p>
+          <Btn onClick={() => go("returns")}>BACK TO RETURNS</Btn>
+        </Panel>
+      </div>
+    );
   function edit(key) {
     setTable(key);
   }
   return (
     <div className="container">
       <Crumbs items={[["Returns", "returns"], "GSTR-3B"]} />
-      <h1>GSTR-3B — Monthly Return</h1>
+      <h1>
+        GSTR-3B — {w.filingFrequency === "QRMP" ? "Quarterly" : "Monthly"}{" "}
+        Return
+      </h1>
       <TaxpayerBar />
       <div className="return-status">
         Status:{" "}
@@ -1163,7 +1074,7 @@ export function Gstr3b() {
                 Taxable Value (₹)
                 <b>
                   {money(
-                    p.gstr3b.tables[key]?.taxable ??
+                    (p.gstr3b.tables[key] || w.draft3b?.[key])?.taxable ??
                       (key === "3.1"
                         ? (w.outwardSummary || w.summary).taxable
                         : 0),
@@ -1171,11 +1082,11 @@ export function Gstr3b() {
                 </b>
               </span>
               <span>
-                Total Tax (₹)
+                {key === "5" ? "Total Supplies (₹)" : "Total Tax (₹)"}
                 <b>
                   {money(
                     total(
-                      p.gstr3b.tables[key]?.taxes ||
+                      (p.gstr3b.tables[key] || w.draft3b?.[key])?.taxes ||
                         (key === "3.1"
                           ? (w.outwardSummary || w.summary).taxes
                           : key === "4"
@@ -1324,7 +1235,18 @@ export function Ledgers() {
 }
 
 export function Challans() {
-  const { w, active, mutate, go } = usePortal();
+  const { w, active, user, mutate, go } = usePortal();
+  const [reason, setReason] = useState(
+    w.filingFrequency === "QRMP"
+      ? "Monthly payment for quarterly return"
+      : "Any other payment",
+  );
+  const [challanType, setChallanType] = useState("Self-assessment basis");
+  const [bankStep, setBankStep] = useState(false),
+    [terms, setTerms] = useState(false),
+    [bankOtp, setBankOtp] = useState(null),
+    [code, setCode] = useState("");
+  const [paymentEmail, setPaymentEmail] = useState(user.email);
   const [creating, setCreating] = useState(false);
   const [selected, setSelected] = useState(null);
   const [bank, setBank] = useState("");
@@ -1335,7 +1257,16 @@ export function Challans() {
       <Crumbs items={["Services", "Payments"]} />
       <Panel
         title="Challan History"
-        extra={<Btn onClick={() => setCreating(true)}>CREATE CHALLAN</Btn>}
+        extra={
+          <Btn
+            onClick={() => {
+              setAmounts({ ...w.paymentPlan.shortfall });
+              setCreating(true);
+            }}
+          >
+            CREATE CHALLAN
+          </Btn>
+        }
       >
         <Table
           columns={[
@@ -1356,7 +1287,16 @@ export function Challans() {
               <td>{c.mode}</td>
               <td>{c.status}</td>
               <td>
-                <button className="link" onClick={() => setSelected(c)}>
+                <button
+                  className="link"
+                  onClick={() => {
+                    setSelected(c);
+                    setBankStep(false);
+                    setTerms(false);
+                    setBankOtp(null);
+                    setCode("");
+                  }}
+                >
                   {c.status === "Paid" ? "VIEW RECEIPT" : "PAY / VIEW"}
                 </button>
               </td>
@@ -1374,6 +1314,28 @@ export function Challans() {
           <p>
             GSTIN: <b>{active.state.taxpayer.gstin}</b>
           </p>
+          <div className="form-grid">
+            <Select
+              label="Reason for Challan"
+              value={reason}
+              options={[
+                "Monthly payment for quarterly return",
+                "Any other payment",
+              ]}
+              onChange={(e) => setReason(e.target.value)}
+            />
+            <Select
+              label="Challan Type"
+              value={challanType}
+              options={["Self-assessment basis", "Fixed sum basis"]}
+              onChange={(e) => setChallanType(e.target.value)}
+            />
+            <Input
+              label="Payment Period"
+              value={periodLabel(w.period)}
+              readOnly
+            />
+          </div>
           <div className="form-grid">
             {HEADS.map((h) => (
               <Input
@@ -1408,7 +1370,13 @@ export function Challans() {
                 const result = await mutate("challan/create", {
                   amounts,
                   mode,
+                  reason,
+                  challanType,
                 });
+                setBankStep(false);
+                setTerms(false);
+                setBankOtp(null);
+                setCode("");
                 setCreating(false);
                 setSelected(result.challan);
               }}
@@ -1432,6 +1400,10 @@ export function Challans() {
               CPIN: <b>{selected.cpin}</b>
             </p>
             <p>GSTIN: {active.state.taxpayer.gstin}</p>
+            <p>
+              Reason: {selected.reason || "Any other payment"} · Challan Type:{" "}
+              {selected.challanType || "Self-assessment basis"}
+            </p>
             <HeadTable rows={[["Tax", selected.amounts]]} />
             <p>
               Total Amount: <b>₹ {money(selected.total)}</b>
@@ -1450,9 +1422,70 @@ export function Challans() {
               label="Select Bank"
               required
               value={bank}
-              options={["State Bank", "National Bank", "City Bank"]}
+              options={["State Bank of India", "National Bank", "City Bank"]}
               onChange={(e) => setBank(e.target.value)}
             />
+          )}
+          {selected.status !== "Paid" && (
+            <>
+              <label className="check-line">
+                <input
+                  type="checkbox"
+                  checked={terms}
+                  onChange={(e) => setTerms(e.target.checked)}
+                />
+                I accept the terms and conditions.
+              </label>
+              {bankStep && (
+                <Panel title={`${bank} — Net Banking`}>
+                  <p>Selected Account: Savings Account ·•••• 0000</p>
+                  <p>Payment Amount: ₹ {money(selected.total)}</p>
+                  <Input
+                    label="Email Address for OTP"
+                    type="email"
+                    value={paymentEmail}
+                    onChange={(e) => setPaymentEmail(e.target.value)}
+                  />
+                  {!bankOtp ? (
+                    <Btn
+                      onClick={async () => {
+                        const result = await mutate("challan/otp", {
+                          id: selected.id,
+                          bank,
+                          terms,
+                          email: paymentEmail,
+                        });
+                        setBankOtp(result.otp);
+                      }}
+                    >
+                      CONFIRM PAYMENT
+                    </Btn>
+                  ) : (
+                    <>
+                      <Input
+                        label="OTP"
+                        inputMode="numeric"
+                        value={code}
+                        onChange={(e) => setCode(e.target.value)}
+                      />
+                      <OtpResend
+                        delivery={bankOtp}
+                        onResend={async () => {
+                          const result = await mutate("challan/otp", {
+                            id: selected.id,
+                            bank,
+                            terms,
+                            email: paymentEmail,
+                          });
+                          setBankOtp(result.otp);
+                          setCode("");
+                        }}
+                      />
+                    </>
+                  )}
+                </Panel>
+              )}
+            </>
           )}
           <div className="actions">
             <Btn tone="secondary" onClick={() => window.print()}>
@@ -1460,15 +1493,21 @@ export function Challans() {
             </Btn>
             {selected.status !== "Paid" && (
               <Btn
-                disabled={!bank}
+                disabled={!bank || !terms || (bankStep && !bankOtp)}
                 onClick={async () => {
+                  if (!bankStep) {
+                    setBankStep(true);
+                    return;
+                  }
                   const result = await mutate("challan/pay", {
                     id: selected.id,
+                    challengeId: bankOtp.challengeId,
+                    otp: code,
                   });
                   setSelected(result.challan);
                 }}
               >
-                MAKE PAYMENT
+                {bankStep ? "VERIFY OTP & PAY" : "MAKE PAYMENT"}
               </Btn>
             )}
             <Btn tone="secondary" onClick={() => setSelected(null)}>

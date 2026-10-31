@@ -4,7 +4,8 @@ frontend/dist/
 frontend/.env
 frontend/.env.local
 .vite/
-backend/data/
+backend/data/*
+!backend/data/hsn-sac.json
 backend/.env
 backend/.env.*
 !backend/.env.example

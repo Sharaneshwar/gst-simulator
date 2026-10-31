@@ -338,6 +338,25 @@ export function Login() {
 
 export function Dashboard() {
   const { active, w, go, user } = usePortal();
+  if (user.registrationRequired)
+    return (
+      <div className="container">
+        <Crumbs />
+        <h1>Welcome, {user.email}</h1>
+        <Panel title="Register your business">
+          <p>
+            Your access is ready. Start a registration and enter the business
+            details there.
+          </p>
+          <div className="actions">
+            <Btn onClick={() => go("registration")}>NEW REGISTRATION</Btn>
+            <Btn tone="secondary" onClick={() => go("track")}>
+              MY APPLICATIONS
+            </Btn>
+          </div>
+        </Panel>
+      </div>
+    );
   return (
     <div className="container">
       <Crumbs />
@@ -375,13 +394,13 @@ export function Dashboard() {
             <dt>Registration Status</dt>
             <dd className="green">Active</dd>
             <dt>Return Filing Frequency</dt>
-            <dd>{active.state.taxpayer.filingFrequency}</dd>
+            <dd>
+              {w.filingFrequency || active.state.taxpayer.filingFrequency}
+            </dd>
           </dl>
-          {user.role === "instructor" && (
-            <button className="link" onClick={() => go("business")}>
-              Switch Business ▸
-            </button>
-          )}
+          <button className="link" onClick={() => go("business")}>
+            Switch Business ▸
+          </button>
         </Panel>
         <Panel title="Electronic Ledgers">
           <Table columns={["Ledger", "Available balance (₹)"]}>
@@ -620,13 +639,19 @@ export function InfoPage({ page }) {
                 GSTR-1 JSON TEMPLATE ↓
               </Btn>
               <Btn tone="secondary" onClick={() => go("offline")}>
-                UPLOAD RETURN JSON
+                UPLOAD GSTR-1 JSON
+              </Btn>
+              <Btn tone="secondary" onClick={() => go("offline3b")}>
+                GSTR-3B OFFLINE UPLOAD
+              </Btn>
+              <Btn tone="secondary" onClick={() => go("supplier-data")}>
+                SUPPLIER RETURN DATA
               </Btn>
             </div>
             <p className="info">
-              Supported import formats: portal invoice JSON and single-rate B2B
-              records from the GST offline utility. Multi-rate invoices and
-              other utility sections need their online forms.
+              Upload GSTR-1 utility JSON with B2B, B2CL, B2CS, exports, notes,
+              nil-rated supplies, HSN and document summaries. GSTR-3B and
+              document portals also support their own JSON uploads.
             </p>
           </>
         ) : page === "help" || page === "law" ? (

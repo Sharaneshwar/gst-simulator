@@ -120,7 +120,10 @@ function allowed(user, now = Date.now()) {
   );
 }
 function publicUser(user) {
-  const business = user.business_json ? JSON.parse(user.business_json) : null;
+  const savedBusiness = user.business_json
+    ? JSON.parse(user.business_json)
+    : null;
+  const business = savedBusiness?.registrationRequired ? null : savedBusiness;
   const amendment = user.business_amendment_json
     ? JSON.parse(user.business_amendment_json)
     : null;
@@ -130,6 +133,7 @@ function publicUser(user) {
     email: user.email,
     role: user.role,
     business,
+    registrationRequired: Boolean(savedBusiness?.registrationRequired),
     amendment,
     isEnabled: Boolean(user.is_enabled),
     accessStatus: user.access_status,
@@ -325,6 +329,12 @@ function mountAccess(app, deps) {
       .prepare("SELECT * FROM users WHERE id = ?")
       .get(user.id);
     const business = JSON.parse(current.business_json);
+    if (business?.registrationRequired)
+      return res
+        .status(400)
+        .json({
+          message: "Complete a registration before amending business details.",
+        });
     const previous =
       current.business_amendment_json &&
       JSON.parse(current.business_amendment_json);
@@ -358,6 +368,7 @@ function mountAccess(app, deps) {
         .json({ message: "Change the legal or trade name before submitting." });
     const amendment = {
       id: crypto.randomUUID(),
+      businessSlug: current.business_slug,
       legalName,
       tradeName,
       reason,
@@ -404,17 +415,30 @@ function mountAccess(app, deps) {
       amendment.reviewedBy = actor.name;
       amendment.note = note;
       if (amendment.status === "Approved") {
+        const slug = amendment.businessSlug || user.business_slug;
+        const row = await db
+          .prepare(
+            "SELECT state_json, revision FROM user_case_state WHERE user_id = ? AND case_slug = ?",
+          )
+          .get(user.id, slug);
+        if (!row)
+          throw Object.assign(
+            Error("The business for this amendment is unavailable."),
+            { status: 409 },
+          );
+        const state = JSON.parse(row.state_json);
         const business = {
-          ...JSON.parse(user.business_json),
+          ...state.taxpayer,
           legalName: amendment.legalName,
           tradeName: amendment.tradeName,
         };
-        const active = await getActiveCase(user.id);
-        active.state.taxpayer = { ...active.state.taxpayer, ...business };
-        await saveState(user.id, active.slug, active.state, active.revision);
+        state.taxpayer = business;
+        await saveState(user.id, slug, state, row.revision);
         await db
-          .prepare("UPDATE users SET business_json = ?, name = ? WHERE id = ?")
-          .run(JSON.stringify(business), business.legalName, user.id);
+          .prepare(
+            "UPDATE users SET business_json = ? WHERE id = ? AND business_slug = ?",
+          )
+          .run(JSON.stringify(business), user.id, slug);
       }
       await db
         .prepare("UPDATE users SET business_amendment_json = ? WHERE id = ?")
@@ -449,34 +473,11 @@ function mountAccess(app, deps) {
     const actor = await instructor(req, res);
     if (!actor || !throttle(req, res, "invite", 20, 3600000)) return;
     const email = normalizeEmail(req.body?.email),
-      name = String(req.body?.name || "").trim(),
-      role = req.body?.role;
-    if (
-      !validEmail(email) ||
-      name.length < 2 ||
-      name.length > 80 ||
-      !["student", "instructor"].includes(role)
-    )
+      name = email,
+      role = req.body?.role || "student";
+    if (!validEmail(email) || !["student", "instructor"].includes(role))
       return res.status(400).json({
-        message: "Enter a valid name, email and Student or Instructor role.",
-      });
-    if (/[\x00-\x1f]/.test(name))
-      return res.status(400).json({ message: "Enter a valid name." });
-    const tradeName = String(req.body?.tradeName || name).trim();
-    const gstin = String(req.body?.gstin || "29AAFCB0000A1Z4")
-      .trim()
-      .toUpperCase();
-    if (
-      role === "student" &&
-      (tradeName.length < 2 ||
-        tradeName.length > 80 ||
-        /[\x00-\x1f]/.test(tradeName) ||
-        !/^\d{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(gstin) ||
-        !STATE_CODES[gstin.slice(0, 2)])
-    )
-      return res.status(400).json({
-        message:
-          "Enter a trade name and a 15-character practice GSTIN with a valid state code. GSTINs may repeat across accounts.",
+        message: "Enter a valid email and Student or Instructor role.",
       });
     if (await db.prepare("SELECT id FROM users WHERE email = ?").get(email))
       return res
@@ -508,16 +509,7 @@ function mountAccess(app, deps) {
           .prepare(
             "UPDATE users SET business_slug = 'regular-october', business_json = ? WHERE id = ?",
           )
-          .run(
-            JSON.stringify({
-              legalName: name,
-              tradeName,
-              gstin,
-              pan: gstin.slice(2, 12),
-              state: STATE_CODES[gstin.slice(0, 2)],
-            }),
-            userId,
-          );
+          .run(JSON.stringify({ registrationRequired: true }), userId);
       await audit(actor.id, userId, "invitation.created");
       const delivered = await deliver(
         await db.prepare("SELECT * FROM users WHERE id = ?").get(userId),
@@ -655,4 +647,5 @@ module.exports = {
   allowed,
   publicUser,
   ACCESS_MESSAGE,
+  STATE_CODES,
 };

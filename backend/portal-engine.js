@@ -1,6 +1,10 @@
 "use strict";
+const hsnMaster = require("./hsn-master");
+const registrationPeople = require("./registration-people");
 
 const crypto = require("node:crypto");
+const flow = require("./practice-workflows");
+const eway = require("./eway-rules");
 const { normalizeEmail } = require("./otp-service");
 const HEADS = ["igst", "cgst", "sgst", "cess"];
 const SECTIONS = [
@@ -156,6 +160,8 @@ function ensureWorkspace(state, label) {
       registration: { stage: "new", partA: {}, tabs: {}, savedTabs: [] },
     };
   }
+  flow.setFrequency(state.workspace);
+  state.workspace.homeState = state.taxpayer.state;
   return state.workspace;
 }
 function getPeriod(workspace, key = workspace.period) {
@@ -201,10 +207,28 @@ function summary(period) {
 }
 function eligibleCredit(period) {
   return period.purchases
-    .filter((p) => p.match === "Matched")
-    .reduce((out, p) => add(out, p.taxes), zeros());
+    .filter((p) => p.match === "Matched" && p.includedIn2b !== false)
+    .reduce(
+      (out, p) =>
+        add(
+          out,
+          Object.fromEntries(
+            HEADS.map((h) => [
+              h,
+              (p.documentType === "Credit Note" ? -1 : 1) * (p.taxes[h] || 0),
+            ]),
+          ),
+        ),
+      zeros(),
+    );
 }
-function validateInvoice(input, period, homeState, existing = []) {
+function validateInvoice(
+  input,
+  period,
+  homeState,
+  existing = [],
+  allowedPeriods = [period],
+) {
   if (!SECTIONS.includes(input.section)) fail("Select a valid GSTR-1 section.");
   const section = input.section;
   const aggregate = [
@@ -245,8 +269,8 @@ function validateInvoice(input, period, homeState, existing = []) {
   if (
     !aggregate &&
     (!/^\d{4}-\d{2}-\d{2}$/.test(date) ||
-      Number.isNaN(Date.parse(date)) ||
-      (date.slice(0, 7) !== period &&
+      !flow.validDate(date) ||
+      (!allowedPeriods.includes(date.slice(0, 7)) &&
         !(section.endsWith("A") && date.slice(0, 7) === input.originalPeriod)))
   )
     fail("Document date must fall within the selected return period.");
@@ -277,6 +301,9 @@ function validateInvoice(input, period, homeState, existing = []) {
     originalNumber: String(input.originalNumber || ""),
     originalPeriod: input.originalPeriod || "",
     hsn: input.hsn || "",
+    ...(section === "HSN"
+      ? { hsnDescription: hsnMaster.lookup(input.hsn)?.description || "" }
+      : {}),
     quantity: amount(input.quantity),
     uqc: input.uqc || "NOS",
     issued: amount(input.issued),
@@ -285,8 +312,43 @@ function validateInvoice(input, period, homeState, existing = []) {
     toSerial: input.toSerial || "",
     supplyType: input.supplyType || "Intra-state",
     reverseCharge: Boolean(input.reverseCharge),
+    portCode: String(input.portCode || "")
+      .toUpperCase()
+      .slice(0, 6),
+    shippingBillNumber: String(input.shippingBillNumber || "").slice(0, 30),
+    shippingBillDate: String(input.shippingBillDate || ""),
+    nilType: input.nilType || "Nil Rated",
+    recipientType: input.recipientType || "Registered",
+    documentType: String(input.documentType || "1"),
+    reportedTaxes: input.reportedTaxes ? heads(input.reportedTaxes) : undefined,
   };
-  row.taxes = taxFor(row, homeState);
+  if (
+    section.startsWith("EXP") &&
+    row.shippingBillDate &&
+    Number.isNaN(Date.parse(row.shippingBillDate))
+  )
+    fail("Enter a valid shipping bill date.");
+  if (
+    section.startsWith("EXP") &&
+    row.portCode &&
+    !/^[A-Z0-9]{6}$/.test(row.portCode)
+  )
+    fail("Port code must contain six letters or digits.");
+  if (Array.isArray(input.items) && input.items.length) {
+    if (input.items.length > 100) fail("Add at most 100 tax-rate rows.");
+    row.items = input.items.map((item) => {
+      const rate = amount(item.rate, "Tax rate");
+      if (![0, 0.1, 0.25, 1, 1.5, 3, 5, 6, 7.5, 12, 18, 28, 40].includes(rate))
+        fail("Select an available tax rate.");
+      return { rate, taxable: amount(item.taxable), cess: amount(item.cess) };
+    });
+    row.taxable = round(row.items.reduce((n, i) => n + i.taxable, 0));
+    row.taxes = row.items.reduce(
+      (out, item) => add(out, taxFor({ ...row, ...item }, homeState)),
+      zeros(),
+    );
+  } else row.taxes = taxFor(row, homeState);
+  if (section === "HSN" && row.reportedTaxes) row.taxes = row.reportedTaxes;
   row.invoiceValue =
     input.invoiceValue !== undefined && input.invoiceValue !== ""
       ? amount(input.invoiceValue, "Invoice value")
@@ -332,7 +394,10 @@ function allocation(liability, credit, cash) {
 }
 function paymentPlan(period, workspace) {
   // RCM, interest and late fee cannot be paid with ITC.
-  const tables = period.gstr3b.tables;
+  const tables = {
+    ...flow.draft3b(period, workspace.homeState),
+    ...period.gstr3b.tables,
+  };
   const output =
     tables["3.1"]?.taxes ||
     summary({
@@ -365,18 +430,52 @@ function paymentPlan(period, workspace) {
 function viewState(state, label) {
   const w = ensureWorkspace(state, label);
   const p = getPeriod(w);
-  w.summary = summary(p);
+  const q = flow.quarterInfo(w.period);
+  const outward = flow.returnData(w, p, "gstr1"),
+    monthly = flow.returnData(w, p);
+  w.registrationSignatories = registrationPeople.signatories(w.registration);
+  w.documentDate = eway.workingDate(w);
+  w.ewayMasters = {
+    mapping: eway.MAPPING,
+    units: eway.UQC,
+    documentTypes: Object.values(eway.DOC_TYPES),
+  };
+  w.returnInfo = {
+    ...q,
+    frequency: w.filingFrequency || "Monthly",
+    isIff: w.filingFrequency === "QRMP" && !q.isEnd,
+  };
+  w.gstr1Invoices = outward.invoices;
+  w.gstr3bInvoices = monthly.invoices;
+  w.gstr3bPurchases = monthly.purchases;
+  w.draft3b = flow.draft3b(monthly, state.taxpayer.state);
+  w.summary = summary(outward);
   w.outwardSummary = summary({
-    ...p,
-    invoices: p.invoices.filter((i) => !i.reverseCharge),
+    ...monthly,
+    invoices: monthly.invoices.filter((i) => !i.reverseCharge),
   });
-  w.eligibleItc = eligibleCredit(p);
-  w.paymentPlan = paymentPlan(p, w);
+  w.eligibleItc = eligibleCredit(monthly);
+  w.paymentPlan = paymentPlan(monthly, w);
   return state;
 }
+function publicState(state) {
+  const out = structuredClone(state);
+  if (out.workspace) delete out.workspace.documentCaptchas;
+  for (const account of Object.values(out.workspace?.documentPortals || {})) {
+    delete account.passwordHash;
+    delete account.salt;
+  }
+  return out;
+}
 function mountPortal(app, deps) {
-  const { activeFor, saveState, requireAuth, getActiveCase, getOtpService } =
-    deps;
+  const {
+    activeFor,
+    saveState,
+    requireAuth,
+    getActiveCase,
+    getOtpService,
+    completeRegistration,
+  } = deps;
   const otpScope = (ctx, w, purpose) =>
     `${ctx.user.id}:${ctx.active.slug}:${purpose}${purpose.startsWith("gstr") ? ":" + w.period : ""}`;
   const signingBinding = (purpose, body, w, p) => ({
@@ -408,21 +507,33 @@ function mountPortal(app, deps) {
         const ctx = await activeFor(req, res);
         if (!ctx) return;
         const w = ensureWorkspace(ctx.active.state, ctx.active.period);
+        if (
+          ctx.active.state.taxpayer.registrationRequired &&
+          !path.startsWith("registration/") &&
+          !(
+            path === "signing/send" &&
+            req.body?.purpose === "registration-submit"
+          )
+        )
+          fail("Complete a registration before using this business workspace.");
         if (req.body?.period) {
           checkPeriod(req.body.period);
           w.period = req.body.period;
         }
+        flow.setFrequency(w);
         const p = getPeriod(w);
         const result = (await handler(req.body || {}, w, p, ctx)) || {};
-        await saveState(
-          ctx.user.id,
-          ctx.active.slug,
-          ctx.active.state,
-          ctx.active.revision,
-        );
+        if (path === "registration/submit") await completeRegistration(ctx);
+        else
+          await saveState(
+            ctx.user.id,
+            ctx.active.slug,
+            ctx.active.state,
+            ctx.active.revision,
+          );
         res.json({
           ...result,
-          state: viewState(ctx.active.state, ctx.active.period),
+          state: publicState(viewState(ctx.active.state, ctx.active.period)),
         });
       } catch (error) {
         if (error.status)
@@ -430,7 +541,51 @@ function mountPortal(app, deps) {
         else next(error);
       }
     });
+  const revision = (w, p) =>
+    JSON.stringify([
+      w.filingFrequency || "Monthly",
+      ...(w.filingFrequency === "QRMP" && flow.quarterInfo(w.period).isEnd
+        ? flow.quarterInfo(w.period).periods
+        : [w.period]
+      ).map((k) => [
+        k,
+        w.periods[k]?.gstr1.revision || 0,
+        k === w.period ? null : w.periods[k]?.gstr1.status,
+      ]),
+    ]);
+  const assert3b = (w) => {
+    if (w.filingFrequency === "QRMP" && !flow.quarterInfo(w.period).isEnd)
+      fail(
+        "GSTR-3B is available at quarter end. Use PMT-06 for monthly payments.",
+      );
+  };
   route("period", () => ({ message: "Return period selected." }));
+  route("filing-frequency", (body, w) => {
+    if (!["Monthly", "QRMP"].includes(body.frequency))
+      fail("Select Monthly or QRMP.");
+    const year = flow.financialYear(w.period);
+    if (
+      Object.entries(w.periods)
+        .filter(([k]) => flow.financialYear(k) === year)
+        .some(
+          ([, p]) =>
+            p.gstr1.status === "Filed" ||
+            ["Offset", "Filed"].includes(p.gstr3b.status),
+        )
+    )
+      fail(
+        "Filing frequency cannot change after a return has been filed. Existing filed work is preserved.",
+      );
+    w.filingPreferences[year] = body.frequency;
+    flow.setFrequency(w);
+    Object.entries(w.periods)
+      .filter(([k]) => flow.financialYear(k) === year)
+      .forEach(([, p]) => {
+        delete p.gstr1.summary;
+        p.gstr1.status = "Not Filed";
+      });
+    return { message: "Return filing frequency updated." };
+  });
   route("signing/send", async (body, w, p, ctx) => {
     const purpose = body.purpose;
     if (!["gstr1-file", "gstr3b-file", "registration-submit"].includes(purpose))
@@ -440,7 +595,8 @@ function mountPortal(app, deps) {
     if (
       purpose === "gstr1-file" &&
       (p.gstr1.status !== "Ready to File" ||
-        p.gstr1.summaryRevision !== p.gstr1.revision)
+        p.gstr1.summaryRevision !== p.gstr1.revision ||
+        (p.gstr1.sourceRevision && p.gstr1.sourceRevision !== revision(w, p)))
     )
       fail("Generate the latest GSTR-1 summary before requesting an OTP.");
     if (purpose === "gstr3b-file" && p.gstr3b.status !== "Offset")
@@ -463,13 +619,16 @@ function mountPortal(app, deps) {
     return { otp, message: `OTP sent to ${otp.recipient}.` };
   });
   route("invoice/save", (body, w, p, ctx) => {
-    if (p.gstr1.status === "Filed")
-      fail("This return is filed. Select a later period to amend a document.");
+    flow.assertWritable(w, p);
+    flow.assertIff(w, body.invoice?.section);
     const row = validateInvoice(
       body.invoice || {},
       w.period,
       ctx.active.state.taxpayer.state,
-      p.invoices,
+      flow.returnData(w, p, "gstr1").invoices,
+      w.filingFrequency === "QRMP" && flow.quarterInfo(w.period).isEnd
+        ? flow.quarterInfo(w.period).periods
+        : [w.period],
     );
     if (row.originalNumber) {
       if (
@@ -508,25 +667,65 @@ function mountPortal(app, deps) {
     return { invoice: row, message: "Details saved successfully." };
   });
   route("invoice/delete", (body, w, p) => {
-    if (p.gstr1.status === "Filed")
-      fail("Filed return documents cannot be deleted.");
+    flow.assertWritable(w, p);
     if (!p.invoices.some((i) => i.id === body.id)) fail("Document not found.");
     p.invoices = p.invoices.filter((i) => i.id !== body.id);
     p.gstr1.revision += 1;
     delete p.gstr1.summary;
     return { message: "Document deleted." };
   });
+  route("nil/save", (body, w, p, ctx) => {
+    flow.assertWritable(w, p);
+    flow.assertIff(w, "NIL");
+    if (!Array.isArray(body.rows) || body.rows.length > 12)
+      fail("Invalid nil-rated supply details.");
+    const records = body.rows.map((row) => {
+      if (
+        !["Nil Rated", "Exempt", "Non-GST"].includes(row.nilType) ||
+        !["Registered", "Unregistered"].includes(row.recipientType) ||
+        !["Intra-state", "Inter-state"].includes(row.supplyType)
+      )
+        fail("Select a valid supply category.");
+      return validateInvoice(
+        {
+          ...row,
+          section: "NIL",
+          number: `${row.supplyType}-${row.recipientType}-${row.nilType}`.slice(
+            0,
+            30,
+          ),
+          place: ctx.active.state.taxpayer.state,
+          rate: 0,
+        },
+        w.period,
+        ctx.active.state.taxpayer.state,
+      );
+    });
+    p.invoices = [
+      ...p.invoices.filter((i) => i.section !== "NIL"),
+      ...records.filter((i) => i.taxable > 0),
+    ];
+    p.gstr1.revision++;
+    p.gstr1.status = "In Progress";
+    delete p.gstr1.summary;
+    return { message: "Nil-rated supplies saved." };
+  });
   route("gstr1/summary", (body, w, p) => {
-    if (p.gstr1.status === "Filed") fail("The return has already been filed.");
-    p.gstr1.summary = summary(p);
+    flow.assertWritable(w, p);
+    const data = flow.returnData(w, p, "gstr1");
+    if (w.filingFrequency === "QRMP" && !flow.quarterInfo(w.period).isEnd)
+      data.invoices.forEach((i) => flow.assertIff(w, i.section));
+    p.gstr1.summary = summary(data);
     p.gstr1.summaryRevision = p.gstr1.revision;
     p.gstr1.generatedAt = stamp();
     p.gstr1.status = "Ready to File";
+    p.gstr1.sourceRevision = revision(w, p);
     return { message: "Summary generated successfully." };
   });
   route("gstr1/file", async (body, w, p, ctx) => {
+    flow.assertWritable(w, p);
     if (p.gstr1.status === "Filed") fail("This return has already been filed.");
-    if (w.period > w.initialPeriod) {
+    if (w.period > w.initialPeriod && w.filingFrequency !== "QRMP") {
       const previousDate = new Date(`${w.period}-01T00:00:00Z`);
       previousDate.setUTCMonth(previousDate.getUTCMonth() - 1);
       const previous = previousDate.toISOString().slice(0, 7);
@@ -535,11 +734,17 @@ function mountPortal(app, deps) {
           `File GSTR-3B for ${previous} before filing the next period's GSTR-1.`,
         );
     }
-    if (!p.gstr1.summary || p.gstr1.summaryRevision !== p.gstr1.revision)
+    if (
+      !p.gstr1.summary ||
+      p.gstr1.summaryRevision !== p.gstr1.revision ||
+      (p.gstr1.sourceRevision && p.gstr1.sourceRevision !== revision(w, p))
+    )
       fail("Generate the latest summary before filing.");
     if (
       body.nil &&
-      p.invoices.some((i) => Number(i.taxable) > 0 || i.issued > 0)
+      flow
+        .returnData(w, p, "gstr1")
+        .invoices.some((i) => Number(i.taxable) > 0 || i.issued > 0)
     )
       fail("A nil return cannot contain outward supply records.");
     await signingCheck(body, "gstr1-file", w, p, ctx);
@@ -553,12 +758,14 @@ function mountPortal(app, deps) {
     return { message: `GSTR-1 filed successfully. ARN: ${p.gstr1.arn}` };
   });
   route("gstr3b/save", (body, w, p) => {
+    assert3b(w);
+    const data = flow.returnData(w, p);
     if (["Filed", "Offset"].includes(p.gstr3b.status))
       fail("This return is locked after liability offset.");
     if (
       body.nil &&
-      (summary(p).documents ||
-        p.purchases.length ||
+      (summary(data).documents ||
+        data.purchases.length ||
         Object.values(p.gstr3b.tables).some(
           (t) => total(t.taxes) > 0 || t.taxable > 0,
         ))
@@ -566,55 +773,14 @@ function mountPortal(app, deps) {
       fail(
         "Nil filing is unavailable because the period contains supply or ITC data.",
       );
-    const allowed = ["3.1", "3.1d", "3.1.1", "3.2", "4", "4b", "5", "5.1"];
     if (body.table) {
-      if (!allowed.includes(body.table)) fail("Unknown GSTR-3B table.");
-      const rowKeys = {
-        3.1: ["a", "b", "c", "d", "e"],
-        "3.1.1": ["a", "b"],
-        3.2: ["unregistered", "composition", "uin"],
-        4: ["a1", "a2", "a3", "a4", "a5", "b1", "b2", "d1", "d2"],
-        5: ["exempt", "nongst"],
-        5.1: ["interest", "latefee"],
-      }[body.table];
-      const rows = {};
-      if (body.rows) {
-        if (typeof body.rows !== "object" || Array.isArray(body.rows))
-          fail("Invalid table details.");
-        rowKeys.forEach((key) => {
-          const input = body.rows[key] || {};
-          rows[key] = {
-            taxable: amount(input.taxable),
-            taxes: heads(input.taxes),
-          };
-        });
-        const included =
-          body.table === "3.1"
-            ? ["a", "b"]
-            : body.table === "3.1.1"
-              ? ["a"]
-              : body.table === "4"
-                ? ["a1", "a2", "a3", "a4", "a5"]
-                : rowKeys;
-        const taxes = included.reduce(
-          (out, key) => add(out, rows[key].taxes),
-          zeros(),
-        );
-        p.gstr3b.tables[body.table] = {
-          taxable: included.reduce((n, key) => round(n + rows[key].taxable), 0),
-          taxes,
-          rows,
-        };
-        if (body.table === "3.1") p.gstr3b.tables["3.1d"] = rows.d;
-        if (body.table === "4")
-          p.gstr3b.tables["4b"] = {
-            taxable: 0,
-            taxes: add(rows.b1.taxes, rows.b2.taxes),
-          };
-      } else
-        p.gstr3b.tables[body.table] = {
-          taxable: amount(body.taxable),
-          taxes: heads(body.taxes),
+      const result = flow.validate3b(body.table, body.rows || {});
+      p.gstr3b.tables[body.table] = result;
+      if (body.table === "3.1") p.gstr3b.tables["3.1d"] = result.rows.d;
+      if (body.table === "4")
+        p.gstr3b.tables["4b"] = {
+          taxable: 0,
+          taxes: add(result.rows.b1.taxes, result.rows.b2.taxes),
         };
     }
     p.gstr3b.saved = true;
@@ -623,13 +789,14 @@ function mountPortal(app, deps) {
     return { message: "GSTR-3B details saved successfully." };
   });
   route("gstr3b/offset", (body, w, p) => {
+    assert3b(w);
     if (["Offset", "Filed"].includes(p.gstr3b.status))
       fail("Liability has already been offset.");
     if (!p.gstr3b.saved)
       fail("Save the GSTR-3B details before making payment.");
     if (p.gstr1.status !== "Filed")
       fail("File GSTR-1 for this period before filing GSTR-3B.");
-    const plan = paymentPlan(p, w);
+    const plan = paymentPlan(flow.returnData(w, p), w);
     if (total(plan.shortfall))
       fail(
         "Insufficient cash balance. Create and pay a challan for the shortfall.",
@@ -662,6 +829,7 @@ function mountPortal(app, deps) {
     return { message: "Liability offset successfully. Proceed to filing." };
   });
   route("gstr3b/file", async (body, w, p, ctx) => {
+    assert3b(w);
     if (p.gstr3b.status !== "Offset")
       fail("Offset the liability before filing GSTR-3B.");
     await signingCheck(body, "gstr3b-file", w, p, ctx);
@@ -679,17 +847,46 @@ function mountPortal(app, deps) {
       amounts,
       total: total(amounts),
       status: "Not Paid",
+      verificationRequired: true,
       mode: body.mode || "E-Payment",
+      reason: body.reason || "Any other payment",
+      challanType: body.challanType || "Self-assessment basis",
+      financialYear:
+        Number(w.period.slice(0, 4)) - (Number(w.period.slice(5)) < 4 ? 1 : 0),
       createdAt: stamp(),
       period: w.period,
     };
     w.challans.unshift(challan);
     return { challan, message: "Challan generated successfully." };
   });
-  route("challan/pay", (body, w) => {
+  route("challan/otp", async (body, w, p, ctx) => {
+    const c = w.challans.find((c) => c.id === body.id);
+    if (!c || c.status === "Paid") fail("Select an unpaid challan.");
+    if (!body.bank || !body.terms) fail("Select a bank and accept the terms.");
+    const otp = await getOtpService().issue({
+      scope: otpScope(ctx, w, "challan-" + c.id),
+      userId: ctx.user.id,
+      email: body.email || ctx.user.email,
+      purpose: "bank-payment",
+      binding: { id: c.id, total: c.total, bank: body.bank },
+    });
+    c.verificationRequired = true;
+    c.bank = body.bank;
+    c.otp = otp;
+    return { otp, message: `OTP sent to ${otp.recipient}.` };
+  });
+  route("challan/pay", async (body, w, p, ctx) => {
     const challan = w.challans.find((c) => c.id === body.id);
     if (!challan) fail("Challan not found.");
     if (challan.status === "Paid") fail("This challan has already been paid.");
+    if (!challan.bank || !challan.otp)
+      fail("Confirm the bank payment and verify its OTP first.");
+    await getOtpService().consume({
+      challengeId: body.challengeId || challan.otp?.challengeId,
+      scope: otpScope(ctx, w, "challan-" + challan.id),
+      code: body.otp,
+      binding: { id: challan.id, total: challan.total, bank: challan.bank },
+    });
     challan.status = "Paid";
     challan.cin = challan.cpin + "SBIN";
     challan.paidAt = stamp();
@@ -708,107 +905,61 @@ function mountPortal(app, deps) {
     };
   });
   route("upload", (body, w, p, ctx) => {
-    if (p.gstr1.status === "Filed")
-      fail("A filed return cannot accept uploads.");
-    let data;
-    try {
-      data = typeof body.data === "string" ? JSON.parse(body.data) : body.data;
-    } catch {
-      fail("The uploaded file is not valid JSON.");
-    }
-    if (!data || typeof data !== "object" || Array.isArray(data))
-      fail("Upload a GSTR-1 JSON object.");
-    if (data.gstin && data.gstin !== ctx.active.state.taxpayer.gstin)
-      fail("The GSTIN in this file does not match the selected taxpayer.");
-    if (data.fp && data.fp !== w.period.slice(5) + w.period.slice(0, 4))
-      fail("The return period in the file does not match the selected period.");
-    const incoming = Array.isArray(data.invoices) ? data.invoices : [];
-    const unsupported = [
-      "b2cl",
-      "b2cs",
-      "exp",
-      "cdnr",
-      "cdnur",
-      "hsn",
-      "doc_issue",
-      "nil",
-      "b2ba",
-    ].filter(
-      (key) =>
-        data[key] && (Array.isArray(data[key]) ? data[key].length : true),
-    );
-    if (unsupported.length)
-      fail(
-        `Use the online forms for these offline-utility sections: ${unsupported.join(", ")}. No records were imported.`,
-      );
-    if (Array.isArray(data.b2b))
-      data.b2b.forEach((party) =>
-        (party.inv || []).forEach((inv) => {
-          const rates = new Set((inv.itms || []).map((i) => i.itm_det?.rt));
-          if (rates.size > 1)
-            fail(
-              `Invoice ${inv.inum} contains multiple tax rates. Enter this invoice online.`,
-            );
-          const item = inv.itms?.[0]?.itm_det || {};
-          incoming.push({
-            section: "B2B",
-            number: inv.inum,
-            date: String(inv.idt || "")
-              .split("-")
-              .reverse()
-              .join("-"),
-            gstin: party.ctin,
-            place:
-              String(inv.pos || party.ctin?.slice(0, 2)) ===
-              ctx.active.state.taxpayer.gstin.slice(0, 2)
-                ? ctx.active.state.taxpayer.state
-                : "Other State",
-            taxable: (inv.itms || []).reduce(
-              (n, i) => n + Number(i.itm_det?.txval || 0),
-              0,
-            ),
-            rate: item.rt || 0,
-            recipient: "",
-            cess: (inv.itms || []).reduce(
-              (n, i) => n + Number(i.itm_det?.csamt || 0),
-              0,
-            ),
-          });
-        }),
-      );
-    if (!incoming.length)
-      fail(
-        "No supported invoice records found. Use the downloadable JSON template or B2B invoice JSON.",
-      );
-    const accepted = [],
+    flow.assertWritable(w, p);
+    const data = flow.parseObject(body.data);
+    flow.checkFile(data, ctx.active.state.taxpayer.gstin, w.period);
+    const incoming = flow.parseGstr1(data, w.period),
+      accepted = [],
       errors = [];
-    incoming.forEach((row, i) => {
+    for (const [i, input] of incoming.entries()) {
       try {
-        if (row.section?.endsWith("A"))
-          fail("Enter amendment records in the online amendment form.");
-        accepted.push(
-          validateInvoice(row, w.period, ctx.active.state.taxpayer.state, [
-            ...p.invoices,
-            ...accepted,
-          ]),
+        flow.assertIff(w, input.section);
+        const row = validateInvoice(
+          input,
+          w.period,
+          ctx.active.state.taxpayer.state,
+          [...flow.returnData(w, p, "gstr1").invoices, ...accepted],
+          w.filingFrequency === "QRMP" && flow.quarterInfo(w.period).isEnd
+            ? flow.quarterInfo(w.period).periods
+            : [w.period],
         );
+        if (
+          row.originalNumber &&
+          row.originalPeriod &&
+          row.originalPeriod !== w.period
+        ) {
+          if (row.originalPeriod >= w.period)
+            fail("Select an earlier original return period.");
+          const original = w.periods[row.originalPeriod];
+          const invoice = original?.invoices.find(
+            (x) => x.number === row.originalNumber,
+          );
+          if (!invoice || original.gstr1.status !== "Filed")
+            fail("Original invoice must belong to a filed return.");
+          row.amendmentBaseline = {
+            taxable: invoice.taxable,
+            taxes: invoice.taxes,
+          };
+        }
+        accepted.push(row);
       } catch (e) {
         errors.push({
           row: i + 1,
-          number: row.number || row.inum || "",
+          number: input.number || "",
           error: e.message,
         });
       }
-    });
+    }
     p.invoices.push(...accepted);
     if (accepted.length) {
-      p.gstr1.revision += 1;
+      p.gstr1.revision++;
       p.gstr1.status = "In Progress";
       delete p.gstr1.summary;
     }
     const upload = {
       id: uid(),
       name: String(body.name || "returns.json").slice(0, 100),
+      type: "GSTR-1",
       accepted: accepted.length,
       errors,
       status: errors.length ? "Processed with errors" : "Processed",
@@ -820,10 +971,130 @@ function mountPortal(app, deps) {
       message: `${accepted.length} records processed; ${errors.length} errors.`,
     };
   });
+  route("gstr3b/upload", (body, w, p, ctx) => {
+    assert3b(w);
+    if (["Filed", "Offset"].includes(p.gstr3b.status))
+      fail("This return is locked.");
+    const d = flow.parseObject(body.data);
+    flow.checkFile(d, ctx.active.state.taxpayer.gstin, w.period);
+    const tables = flow.parseGstr3b(d);
+    p.gstr3b.tables = { ...p.gstr3b.tables, ...tables };
+    if (tables["3.1"]) p.gstr3b.tables["3.1d"] = tables["3.1"].rows.d;
+    if (tables["4"])
+      p.gstr3b.tables["4b"] = {
+        taxable: 0,
+        taxes: add(tables["4"].rows.b1.taxes, tables["4"].rows.b2.taxes),
+      };
+    p.gstr3b.saved = true;
+    p.gstr3b.status = "In Progress";
+    p.gstr3b.nil = false;
+    const upload = {
+      id: uid(),
+      name: String(body.name || "gstr3b.json").slice(0, 100),
+      type: "GSTR-3B",
+      accepted: Object.keys(tables).length,
+      errors: [],
+      status: "Processed",
+      at: stamp(),
+    };
+    p.uploads.unshift(upload);
+    return {
+      upload,
+      message:
+        "GSTR-3B data uploaded. Review the tables before payment and filing.",
+    };
+  });
+  route("purchases/save", (body, w, p, ctx) => {
+    if (
+      ["Offset", "Filed"].includes(p.gstr3b.status) ||
+      (w.filingFrequency === "QRMP" &&
+        ["Offset", "Filed"].includes(
+          w.periods[flow.quarterInfo(w.period).end]?.gstr3b.status,
+        ))
+    )
+      fail("Purchase data is locked after liability offset.");
+    const row = flow.purchaseRow(
+      body.purchase || {},
+      w.period,
+      ctx.active.state.taxpayer.state,
+    );
+    if (
+      p.purchases.some(
+        (i) =>
+          i.id !== row.id &&
+          i.gstin === row.gstin &&
+          i.number === row.number &&
+          i.documentType === row.documentType,
+      )
+    )
+      fail("This supplier document already exists.");
+    const i = p.purchases.findIndex((i) => i.id === row.id);
+    if (i >= 0) p.purchases[i] = row;
+    else p.purchases.push(row);
+    return { message: "Supplier document saved." };
+  });
+  route("purchases/upload", (body, w, p, ctx) => {
+    if (
+      ["Offset", "Filed"].includes(p.gstr3b.status) ||
+      (w.filingFrequency === "QRMP" &&
+        ["Offset", "Filed"].includes(
+          w.periods[flow.quarterInfo(w.period).end]?.gstr3b.status,
+        ))
+    )
+      fail("Purchase data is locked after liability offset.");
+    const d = flow.parseObject(body.data);
+    flow.checkFile(d, ctx.active.state.taxpayer.gstin, w.period);
+    if (
+      !Array.isArray(d.purchases) ||
+      !d.purchases.length ||
+      d.purchases.length > 2000
+    )
+      fail("Provide between 1 and 2,000 purchase documents.");
+    const incoming = d.purchases.map((i) =>
+      flow.purchaseRow(i, w.period, ctx.active.state.taxpayer.state),
+    );
+    const keys = new Set(
+      p.purchases.map((i) =>
+        [i.gstin, i.number, i.documentType || "Invoice"].join(":"),
+      ),
+    );
+    incoming.forEach((i) => {
+      const key = [i.gstin, i.number, i.documentType].join(":");
+      if (keys.has(key)) fail("Duplicate supplier document: " + i.number);
+      keys.add(key);
+    });
+    p.purchases.push(...incoming);
+    return { message: `${incoming.length} supplier documents loaded.` };
+  });
+  route("registration/new", (body, w) => {
+    if (w.registration.createdAt || w.registration.trn) {
+      w.registrationHistory ||= [];
+      w.registrationHistory.unshift(w.registration);
+    }
+    w.registration = { stage: "new", partA: {}, tabs: {}, savedTabs: [] };
+    return {
+      message:
+        "New registration application opened. Previous applications are retained.",
+    };
+  });
   route("registration/start", async (body, w, p, ctx) => {
-    if (["Pending for Validation", "Approved"].includes(w.registration.stage))
-      fail("This application has already been submitted.");
-    const a = body.partA || {};
+    if (w.registration.trn)
+      fail("Open the saved application or start a new registration first.");
+    const a = { ...body.partA, email: ctx.user.email };
+    if (
+      body.partA?.email &&
+      normalizeEmail(body.partA.email) !== normalizeEmail(ctx.user.email)
+    )
+      fail("Use the email address linked to your account.");
+    for (const key of [
+      "type",
+      "state",
+      "district",
+      "legalName",
+      "pan",
+      "mobile",
+    ])
+      if (typeof a[key] === "string") a[key] = a[key].trim();
     for (const key of [
       "type",
       "state",
@@ -847,6 +1118,7 @@ function mountPortal(app, deps) {
     });
     w.registration.partA = a;
     w.registration.createdAt ||= stamp();
+    w.registration.id ||= crypto.randomUUID();
     w.registration.stage = "otp";
     w.registration.otp = otp;
     delete w.registration.otpExpires;
@@ -893,13 +1165,29 @@ function mountPortal(app, deps) {
       code: body.otp,
       binding: { trn: w.registration.trn, email: w.registration.partA.email },
     });
-    if (w.registration.stage !== "Pending for Validation")
+    if (!["Pending for Validation", "Approved"].includes(w.registration.stage))
       w.registration.stage = "draft";
     return { message: "Application opened." };
   });
-  route("registration/save", (body, w) => {
+  route("registration/save", (body, w, p, ctx) => {
+    body = { ...body, values: { ...body.values } };
+    if (["promoters", "signatory", "principal"].includes(body.tab)) {
+      body.values.email ||= ctx.user.email;
+      if (Array.isArray(body.values.records))
+        body.values.records = body.values.records.map((item) => ({
+          ...item,
+          email: item.email || ctx.user.email,
+        }));
+    }
     const r = w.registration;
-    if (!r.trn) fail("Complete OTP verification first.");
+    if (body.tab === "principal") {
+      if (body.values.state && body.values.state !== r.partA.state)
+        fail("The principal place State / UT must match Part A.");
+      body.values.state = r.partA.state;
+      body.values.district ||= r.partA.district;
+    }
+    if (!r.trn || r.stage !== "draft")
+      fail("Verify the TRN OTP to open the draft application first.");
     if (["Pending for Validation", "Approved"].includes(r.stage))
       fail("A submitted application cannot be edited.");
     if (!REG_TABS.includes(body.tab)) fail("Invalid registration tab.");
@@ -916,7 +1204,69 @@ function mountPortal(app, deps) {
       fail("Complete the mandatory fields before saving this tab.");
     if (body.tab === "principal" && !/^\d{6}$/.test(body.values.pincode))
       fail("Enter a valid six-digit PIN code.");
-    r.tabs[body.tab] = body.values;
+    const values =
+      body.tab === "goods"
+        ? hsnMaster.registrationValues(body.values)
+        : body.tab === "aadhaar"
+          ? registrationPeople.authenticationValues(r, body.values)
+          : { ...body.values };
+    if (body.tab === "verification") {
+      const signer = registrationPeople.resolveSignatory(
+        r,
+        values.signatoryId || values.signatory,
+      );
+      if (!signer)
+        fail("Select an authorized signatory saved in this application.");
+      values.signatory = signer.label;
+      values.signatoryId = signer.value;
+    }
+    if (
+      values.records &&
+      (!Array.isArray(values.records) || values.records.length > 20)
+    )
+      fail("Add at most 20 records per section.");
+    for (const item of values.records || [values]) {
+      if (required.some((key) => !String(item[key] || "").trim()))
+        fail("Complete mandatory fields in every record.");
+      if (item.pan && !/^[A-Z]{5}\d{4}[A-Z]$/.test(item.pan))
+        fail("Enter a valid PAN.");
+      if (item.din && !/^\d{7,8}$/.test(item.din))
+        fail("Enter a valid Director Identification Number.");
+      if (body.tab === "goods" && !/^\d{4,8}$/.test(item.hsn))
+        fail("Enter a valid HSN/SAC.");
+      if (item.attachment) item.attachment = flow.attachment(item.attachment);
+    }
+    if (values.attachment)
+      values.attachment = flow.attachment(values.attachment);
+    if (JSON.stringify({ ...r.tabs, [body.tab]: values }).length > 6000000)
+      fail("Total application attachments must be smaller than 4 MB.");
+    r.tabs[body.tab] = values;
+    if (body.tab === "signatory" && r.tabs.aadhaar?.opted === "Yes") {
+      try {
+        r.tabs.aadhaar = registrationPeople.authenticationValues(
+          r,
+          r.tabs.aadhaar,
+        );
+      } catch {
+        r.tabs.aadhaar = { ...r.tabs.aadhaar, person: "", personName: "" };
+        r.savedTabs = r.savedTabs.filter((tab) => tab !== "aadhaar");
+      }
+    }
+    if (
+      body.tab === "signatory" &&
+      r.tabs.verification?.signatory &&
+      !registrationPeople.resolveSignatory(
+        r,
+        r.tabs.verification.signatoryId || r.tabs.verification.signatory,
+      )
+    ) {
+      r.tabs.verification = {
+        ...r.tabs.verification,
+        signatory: "",
+        signatoryId: "",
+      };
+      r.savedTabs = r.savedTabs.filter((tab) => tab !== "verification");
+    }
     if (!r.savedTabs.includes(body.tab)) r.savedTabs.push(body.tab);
     r.stage = "draft";
     return { message: "Details saved successfully." };
@@ -927,20 +1277,191 @@ function mountPortal(app, deps) {
       fail("Application already submitted.");
     if (REG_TABS.some((tab) => !r.savedTabs.includes(tab)))
       fail("Save all registration tabs before submitting.");
+    registrationPeople.authenticationValues(r, r.tabs.aadhaar || {});
+    if (
+      !registrationPeople.resolveSignatory(
+        r,
+        r.tabs.verification?.signatoryId || r.tabs.verification?.signatory,
+      )
+    )
+      fail("Select an authorized signatory saved in this application.");
     await signingCheck(body, "registration-submit", w, p, ctx);
     r.stage = "Pending for Validation";
     r.arn = `AA${crypto.randomInt(1000000000000, 9999999999999)}`;
     r.submittedAt = stamp();
     return { message: `Application submitted. ARN: ${r.arn}` };
   });
+  route("documents/date", (body, w) => {
+    if (!flow.validDate(body.date)) fail("Enter a valid working date.");
+    w.documentDates ||= {};
+    w.documentDates[w.period] = body.date;
+    return { message: "Working date updated." };
+  });
+  route("documents/registration-otp", async (body, w, p, ctx) => {
+    if (!["eway", "einvoice"].includes(body.kind))
+      fail("Select a valid portal.");
+    if (body.gstin !== ctx.active.state.taxpayer.gstin)
+      fail("GSTIN must match the selected taxpayer.");
+    const otp = await getOtpService().issue({
+      scope: otpScope(ctx, w, "document-register-" + body.kind),
+      userId: ctx.user.id,
+      email: ctx.user.email,
+      purpose: body.kind + "-registration",
+      binding: { kind: body.kind, gstin: body.gstin },
+    });
+    return { otp, message: `OTP sent to ${otp.recipient}.` };
+  });
+  route("documents/register", async (body, w, p, ctx) => {
+    if (!["eway", "einvoice"].includes(body.kind))
+      fail("Select a valid portal.");
+    if (String(body.password || "").length < 5)
+      fail("Use a password with at least five characters.");
+    await getOtpService().consume({
+      challengeId: body.challengeId,
+      scope: otpScope(ctx, w, "document-register-" + body.kind),
+      code: body.otp,
+      binding: { kind: body.kind, gstin: ctx.active.state.taxpayer.gstin },
+    });
+    w.documentPortals ||= {};
+    const salt = crypto.randomBytes(16).toString("hex");
+    w.documentPortals[body.kind] = {
+      username: ctx.user.email,
+      salt,
+      passwordHash: crypto.scryptSync(body.password, salt, 32).toString("hex"),
+      registeredAt: stamp(),
+    };
+    return { message: "Portal registration completed. You can now log in." };
+  });
+  route("documents/captcha", (body, w) => {
+    if (body.kind !== "eway") fail("Select the e-way bill portal.");
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const code = Array.from(
+      { length: 6 },
+      () => alphabet[crypto.randomInt(alphabet.length)],
+    ).join("");
+    const id = uid();
+    w.documentCaptchas ||= {};
+    w.documentCaptchas.eway = {
+      id,
+      hash: crypto.createHash("sha256").update(code).digest("hex"),
+      expiresAt: Date.now() + 300000,
+    };
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="260" height="65"><rect width="260" height="65" fill="#edf0fa"/><path d="M0 20L260 42M10 50L240 12" stroke="#a1a8d5"/><text x="25" y="45" font-family="serif" font-size="35" fill="#312784" letter-spacing="7">${code}</text></svg>`;
+    return {
+      captcha: {
+        id,
+        image:
+          "data:image/svg+xml;base64," + Buffer.from(svg).toString("base64"),
+      },
+    };
+  });
+  route("documents/login", (body, w, p, ctx) => {
+    if (body.kind === "eway") {
+      const challenge = w.documentCaptchas?.eway;
+      if (
+        !challenge ||
+        body.captchaId !== challenge.id ||
+        challenge.expiresAt < Date.now() ||
+        crypto
+          .createHash("sha256")
+          .update(String(body.captcha || "").toUpperCase())
+          .digest("hex") !== challenge.hash
+      )
+        fail("Enter the correct CAPTCHA code. Refresh it if expired.");
+    }
+    const account = w.documentPortals?.[body.kind];
+    if (
+      !account ||
+      body.username !== account.username ||
+      !crypto.timingSafeEqual(
+        Buffer.from(account.passwordHash, "hex"),
+        crypto.scryptSync(String(body.password || ""), account.salt, 32),
+      )
+    )
+      fail("Portal username or password is incorrect.");
+    account.sessionUntil = Date.now() + 3600000;
+    if (body.kind === "eway") delete w.documentCaptchas.eway;
+    return { message: "Logged in successfully." };
+  });
+  route("documents/logout", (body, w) => {
+    if (w.documentPortals?.[body.kind])
+      delete w.documentPortals[body.kind].sessionUntil;
+    return { message: "Logged out of portal." };
+  });
+  const documentLogin = (w, kind) => {
+    if (
+      !w.documentPortals?.[kind]?.sessionUntil ||
+      w.documentPortals[kind].sessionUntil < Date.now()
+    )
+      fail("Log in to this document portal first.");
+  };
+  route("documents/bulk", (body, w, p, ctx) => {
+    documentLogin(w, body.kind);
+    const d = flow.parseObject(body.data, true);
+    flow.checkFile(d, ctx.active.state.taxpayer.gstin, w.period);
+    const forms = flow.parseDocumentFile(d, body.kind);
+    if (!forms.length || forms.length > 500)
+      fail("Upload between 1 and 500 documents.");
+    const accepted = [],
+      errors = [];
+    forms.forEach((form, i) => {
+      try {
+        accepted.push(
+          flow.documentRow(
+            { kind: body.kind, form },
+            ctx.active.state.taxpayer,
+            [...w.documents[body.kind], ...accepted],
+            eway.workingDate(w),
+          ),
+        );
+      } catch (e) {
+        errors.push({ row: i + 1, number: form.number, error: e.message });
+      }
+    });
+    w.documents[body.kind].unshift(...accepted);
+    w.documentUploads ||= [];
+    const upload = {
+      id: uid(),
+      kind: body.kind,
+      name: String(body.name || "bulk.json").slice(0, 100),
+      at: stamp(),
+      accepted: accepted.length,
+      errors,
+    };
+    w.documentUploads.unshift(upload);
+    return {
+      upload,
+      message: `${accepted.length} documents generated; ${errors.length} errors.`,
+    };
+  });
   route("documents/create", (body, w, p, ctx) => {
     const kind = body.kind;
+    if (body.form) {
+      documentLogin(w, kind);
+      const doc = flow.documentRow(
+        body,
+        ctx.active.state.taxpayer,
+        w.documents[kind] || [],
+        eway.workingDate(w),
+      );
+      doc.period = w.period;
+      w.documents[kind].unshift(doc);
+      return {
+        document: doc,
+        message:
+          kind === "eway"
+            ? "E-way bill generated successfully."
+            : "IRN generated successfully.",
+      };
+    }
     if (!["eway", "einvoice"].includes(kind)) fail("Unknown document type.");
     const invoice = p.invoices.find((i) => i.id === body.invoiceId);
     if (!invoice) fail("Select an outward invoice.");
     if (
       w.documents[kind].some(
-        (d) => d.invoiceId === invoice.id && d.status !== "Cancelled",
+        (d) =>
+          d.invoiceId === invoice.id &&
+          (kind === "einvoice" || d.status !== "Cancelled"),
       )
     )
       fail("An active document already exists for this invoice.");
@@ -993,13 +1514,64 @@ function mountPortal(app, deps) {
     if (doc.status === "Cancelled") fail("This document is cancelled.");
     if (body.action === "cancel") {
       if (!body.reason) fail("Select a cancellation reason.");
-      if (Date.now() - Date.parse(doc.createdAt) > 86400000)
+      if (
+        (doc.referenceDate
+          ? Date.parse(eway.workingDate(w) + "T12:00:00+05:30") -
+            Date.parse(doc.issuedAt)
+          : Date.now() - Date.parse(doc.createdAt)) > 86400000
+      )
         fail("The 24-hour cancellation window has expired.");
       doc.status = "Cancelled";
       doc.reason = body.reason;
+      doc.remarks = String(body.remarks || "").slice(0, 500);
     } else if (body.action === "vehicle" && body.kind === "eway") {
-      if (!/^[A-Z]{2}\d{1,2}[A-Z]{0,3}\d{4}$/.test(body.vehicle || ""))
+      const workingDate = eway.workingDate(w);
+      if (doc.status === "Part A") {
+        if (
+          (Date.parse(workingDate) - Date.parse(doc.referenceDate)) / 86400000 >
+          15
+        )
+          fail("The 15-day Part A completion window has expired.");
+        const mode = body.mode || "Road";
+        const candidate = {
+          ...doc,
+          number: doc.invoice.number,
+          date: doc.invoice.date,
+          mode,
+          vehicle: body.vehicle || "",
+          transportDocument: body.transportDocument || "",
+          transportDate: body.transportDate || "",
+          partAOnly: false,
+        };
+        if (candidate.transportDate && !flow.validDate(candidate.transportDate))
+          fail("Enter a valid transport document date.");
+        eway.validate(
+          candidate,
+          {
+            gstin:
+              doc.supplyType === "Inward" ? doc.buyer.gstin : doc.seller.gstin,
+          },
+          workingDate,
+        );
+        doc.mode = mode;
+        doc.transportDocument = candidate.transportDocument;
+        doc.transportDate = candidate.transportDate;
+        doc.validUntil = eway.expiry(
+          workingDate,
+          doc.distance,
+          doc.vehicleType,
+        );
+        doc.partAOnly = false;
+        doc.status = "Active";
+        doc.partBAt = workingDate + "T12:00:00+05:30";
+      } else if (!eway.vehicleValid(body.vehicle))
         fail("Enter a valid vehicle number.");
+      if (
+        doc.validUntil &&
+        Date.parse(eway.workingDate(w) + "T12:00:00+05:30") >
+          Date.parse(doc.validUntil)
+      )
+        fail("The e-way bill has expired. Vehicle update is unavailable.");
       doc.vehicle = body.vehicle;
     } else fail("Unknown document action.");
     return { message: "Document updated." };
@@ -1021,6 +1593,7 @@ function mountPortal(app, deps) {
 }
 module.exports = {
   mountPortal,
+  publicState,
   viewState,
   ensureWorkspace,
   freshPeriod,

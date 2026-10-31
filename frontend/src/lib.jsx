@@ -1,6 +1,8 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
-export const PortalContext = createContext(null);
-export const usePortal = () => useContext(PortalContext);
+import { Dropdown } from "./dropdown";
+export { Dropdown } from "./dropdown";
+import { useEffect, useRef, useState } from "react";
+import { usePortal } from "./portal-context";
+export { PortalContext, usePortal } from "./portal-context";
 export const HEADS = ["igst", "cgst", "sgst", "cess"];
 export const money = (n) =>
   Number(n || 0).toLocaleString("en-IN", {
@@ -162,17 +164,22 @@ export function Input({ label, required, help, ...props }) {
 export function Select({ label, options, required, help, ...props }) {
   return (
     <Field label={label} required={required} help={help}>
-      <select {...props} required={required}>
-        <option value="">Select</option>
-        {options.map((o) => (
-          <option
-            key={Array.isArray(o) ? o[0] : o}
-            value={Array.isArray(o) ? o[0] : o}
-          >
-            {Array.isArray(o) ? o[1] : o}
-          </option>
-        ))}
-      </select>
+      <Dropdown
+        {...props}
+        aria-label={props["aria-label"] || label}
+        options={
+          options.some((o) =>
+            Array.isArray(o)
+              ? String(o[0]) === ""
+              : typeof o === "object"
+                ? String(o.value) === ""
+                : o === "",
+          )
+            ? options
+            : [{ value: "", label: props.placeholder || "Select" }, ...options]
+        }
+        required={required}
+      />
     </Field>
   );
 }
@@ -211,6 +218,7 @@ export function Crumbs({ items = [] }) {
 }
 export function TaxpayerBar() {
   const { active, w } = usePortal();
+  if (active?.state.taxpayer.registrationRequired) return null;
   return (
     <div className="taxpayer-bar">
       <span>
@@ -337,10 +345,7 @@ export function OtpResend({ delivery, onResend }) {
 }
 export function Signing({ title, purpose, onSubmit, onClose }) {
   const { active, w, user, mutate } = usePortal();
-  const recipient =
-    w.registration.tabs.signatory?.email ||
-    w.registration.partA.email ||
-    (user.email.endsWith("@demo.com") ? "" : user.email);
+  const recipient = user.email;
   const [form, setForm] = useState({
     declaration: false,
     signatory: "",
@@ -475,6 +480,7 @@ export function ReturnPreview({ type, onClose }) {
                   [
                     "Outward tax",
                     p.gstr3b.tables["3.1"]?.taxes ||
+                      w.draft3b?.["3.1"]?.taxes ||
                       (w.outwardSummary || w.summary).taxes,
                   ],
                   [
@@ -485,7 +491,89 @@ export function ReturnPreview({ type, onClose }) {
                 ]
           }
         />
-        <p>Taxable value: ₹ {money(w.summary.taxable)}</p>
+        {type === "GSTR-1"
+          ? SECTIONS.map(([key, code, title]) => {
+              const rows = (w.gstr1Invoices || p.invoices).filter(
+                (i) => i.section === key,
+              );
+              if (!rows.length) return null;
+              return (
+                <section key={key}>
+                  <h3>
+                    {code} — {title}
+                  </h3>
+                  <Table
+                    columns={[
+                      "Document / Reference",
+                      "Date",
+                      "GSTIN / Category",
+                      "Taxable / Supply Value",
+                      ...HEADS.map((h) => h.toUpperCase()),
+                    ]}
+                    count={rows.length}
+                  >
+                    {rows.map((i) => (
+                      <tr key={i.id}>
+                        <td>
+                          {i.number}
+                          {i.hsn ? ` · HSN ${i.hsn}` : ""}
+                          {i.section === "DOCS"
+                            ? ` · ${i.fromSerial}–${i.toSerial}; Issued ${i.issued}; Cancelled ${i.cancelled}`
+                            : ""}
+                        </td>
+                        <td>{dateLabel(i.date)}</td>
+                        <td>
+                          {i.gstin ||
+                            [i.recipientType, i.nilType]
+                              .filter(Boolean)
+                              .join(" · ") ||
+                            i.place}
+                        </td>
+                        <td>{money(i.taxable)}</td>
+                        {HEADS.map((h) => (
+                          <td key={h}>{money(i.taxes[h])}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </Table>
+                </section>
+              );
+            })
+          : Object.entries({ ...w.draft3b, ...p.gstr3b.tables })
+              .filter(([key]) => !["3.1d", "4b"].includes(key))
+              .map(([key, table]) => (
+                <section key={key}>
+                  <h3>Table {key}</h3>
+                  <Table
+                    columns={[
+                      "Particulars / Place of Supply",
+                      "Taxable Value / Supplies",
+                      ...HEADS.map((h) => h.toUpperCase()),
+                    ]}
+                  >
+                    {(key === "3.2" && table.states?.length
+                      ? table.states.map((row) => [row.place, row])
+                      : Object.entries(table.rows || {}).filter(
+                          ([k]) => k !== "states",
+                        )
+                    ).map(([name, row]) => (
+                      <tr key={name}>
+                        <td>{name}</td>
+                        <td>{money(row.taxable)}</td>
+                        {HEADS.map((h) => (
+                          <td key={h}>{money(row.taxes?.[h])}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </Table>
+                </section>
+              ))}
+        <p>
+          Taxable value: ₹{" "}
+          {money(
+            type === "GSTR-1" ? w.summary.taxable : w.outwardSummary.taxable,
+          )}
+        </p>
         <p>{active.state.taxpayer.legalName}</p>
       </div>
       <div className="actions">

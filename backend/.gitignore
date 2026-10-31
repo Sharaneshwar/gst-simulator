@@ -1,4 +1,5 @@
-data/
+data/*
+!data/hsn-sac.json
 .env
 npm-debug.log*
 .env.neon-test

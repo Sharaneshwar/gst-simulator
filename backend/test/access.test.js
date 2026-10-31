@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gst-access-test-"));
+process.env.NODE_ENV = "development";
 process.env.GST_ENABLE_CASE_LIBRARY = "1";
 if (!process.env.GST_TEST_POSTGRES)
   process.env.SQLITE_PATH = path.join(directory, "access.sqlite");
@@ -141,7 +142,7 @@ test("students cannot list users, invite roles, change access, or rename busines
     401,
   );
 });
-test("instructors invite both roles; emails alone are unique; dummy GSTINs can repeat", async () => {
+test("email-only invitations create access without a business and reject duplicate emails", async () => {
   first = await invite("Person.One@example.com", "student", "First Business");
   second = await invite("person.two@example.com", "student", "Second Business");
   invitedInstructor = await invite(
@@ -157,8 +158,10 @@ test("instructors invite both roles; emails alone are unique; dummy GSTINs can r
     assert.equal(result.password, undefined);
   }
   assert.equal(first.user.email, "person.one@example.com");
-  assert.equal(first.user.business.gstin, second.user.business.gstin);
-  assert.equal(first.user.business.state, "Tamil Nadu");
+  assert.equal(first.user.business, null);
+  assert.equal(second.user.business, null);
+  assert.equal(first.user.name, first.user.email);
+  assert.equal(first.user.registrationRequired, true);
   assert.equal(invitedInstructor.user.role, "instructor");
   assert.equal((await invite(" PERSON.ONE@example.com ")).status, 409);
   assert.equal((await invite("illegal@example.com", "admin")).status, 400);
@@ -172,7 +175,7 @@ test("instructors invite both roles; emails alone are unique; dummy GSTINs can r
     ).password_hash.startsWith("scrypt$"),
   );
 });
-test("first successful login onboards a business and binds exactly one GSTIN across periods", async () => {
+test("first login creates an empty registration workspace, without invented business details", async () => {
   const signed = await login(
     first.user.email,
     sent.find((item) => item.to === first.user.email).password,
@@ -183,10 +186,12 @@ test("first successful login onboards a business and binds exactly one GSTIN acr
   assert.ok(signed.user.lastAccessAt);
   const portal = await request("/portal", undefined, first.token);
   assert.equal(portal.cases.length, 1);
-  assert.equal(portal.activeCase.state.taxpayer.legalName, "First Business");
+  assert.equal(portal.user.business, null);
+  assert.equal(portal.activeCase.state.taxpayer.legalName, "");
+  assert.equal(portal.activeCase.state.taxpayer.gstin, "");
   assert.equal(
-    portal.activeCase.state.taxpayer.gstin,
-    second.user.business.gstin,
+    portal.activeCase.state.workspace.periods["2026-10"].invoices.length,
+    0,
   );
   assert.equal(
     (await request("/portal/cases/nil-october/activate", {}, first.token))
@@ -194,33 +199,19 @@ test("first successful login onboards a business and binds exactly one GSTIN acr
     403,
   );
   assert.equal(
-    (
-      await db
-        .prepare("SELECT COUNT(*) AS n FROM user_case_state WHERE user_id = ?")
-        .get(first.user.id)
-    ).n,
-    1,
-  );
-  assert.equal(
     (await request("/workspace/period", { period: "2026-11" }, first.token))
       .status,
-    200,
+    400,
   );
-  const later = await request("/portal", undefined, first.token);
-  assert.equal(later.activeCase.state.workspace.period, "2026-11");
-  assert.equal(
-    later.activeCase.state.taxpayer.gstin,
-    first.user.business.gstin,
-  );
-  const other = await login(
-    second.user.email,
-    sent.find((item) => item.to === second.user.email).password,
-  );
-  second.token = other.token;
-  assert.equal(
-    (await request("/portal", undefined, second.token)).activeCase.state
-      .workspace.period,
-    "2026-10",
+  second.token = (
+    await login(
+      second.user.email,
+      sent.find((item) => item.to === second.user.email).password,
+    )
+  ).token;
+  assert.deepEqual(
+    (await request("/portal", undefined, second.token)).applications,
+    [],
   );
 });
 test("disabling access rejects active tokens immediately and reactivation requires a new login", async () => {
@@ -365,7 +356,7 @@ test("failed email delivery cannot accidentally grant access", async () => {
   app.locals.sendInvitation = async (email) => sent.push(email);
 });
 test("business name amendments require review, cannot change PAN/GSTIN, and retain saved data", async () => {
-  const original = await request("/portal", undefined, first.token);
+  const original = await request("/portal", undefined, student);
   const amendment = {
     legalName: "First Business Updated",
     tradeName: "First Trading",
@@ -377,49 +368,50 @@ test("business name amendments require review, cannot change PAN/GSTIN, and reta
       await request(
         "/account/business-amendment",
         { ...amendment, gstin: "29AAFCB0000A1Z4" },
-        first.token,
+        student,
       )
     ).status,
     400,
   );
   assert.equal(
-    (await request("/account/business-amendment", amendment, first.token))
-      .status,
+    (await request("/account/business-amendment", amendment, student)).status,
     200,
   );
   assert.equal(
-    (await request("/account/business-amendment", amendment, first.token))
-      .status,
+    (await request("/account/business-amendment", amendment, student)).status,
     409,
   );
   assert.equal(
-    (await request("/portal", undefined, first.token)).activeCase.state.taxpayer
+    (await request("/portal", undefined, student)).activeCase.state.taxpayer
       .legalName,
-    "First Business",
+    original.activeCase.state.taxpayer.legalName,
   );
   const account = (await request("/instructor/users")).users.find(
-    (item) => item.id === first.user.id,
+    (item) => item.id === "user-student-demo",
   );
   assert.equal(
     (
       await request(
-        `/instructor/users/${first.user.id}/business-amendment`,
+        `/instructor/users/${"user-student-demo"}/business-amendment`,
         { decision: "approve", amendmentId: account.amendment.id },
-        first.token,
+        student,
       )
     ).status,
     403,
   );
   assert.equal(
     (
-      await request(`/instructor/users/${first.user.id}/business-amendment`, {
-        decision: "approve",
-        amendmentId: account.amendment.id,
-      })
+      await request(
+        `/instructor/users/${"user-student-demo"}/business-amendment`,
+        {
+          decision: "approve",
+          amendmentId: account.amendment.id,
+        },
+      )
     ).status,
     200,
   );
-  const updated = await request("/portal", undefined, first.token);
+  const updated = await request("/portal", undefined, student);
   assert.equal(updated.user.name, amendment.legalName);
   assert.equal(
     updated.activeCase.state.taxpayer.legalName,
@@ -433,18 +425,21 @@ test("business name amendments require review, cannot change PAN/GSTIN, and reta
     updated.activeCase.state.workspace.periods,
     original.activeCase.state.workspace.periods,
   );
-  await request("/portal/reset", {}, first.token);
+  await request("/portal/reset", {}, student);
   assert.equal(
-    (await request("/portal", undefined, first.token)).activeCase.state.taxpayer
+    (await request("/portal", undefined, student)).activeCase.state.taxpayer
       .legalName,
     amendment.legalName,
   );
   assert.equal(
     (
-      await request(`/instructor/users/${first.user.id}/business-amendment`, {
-        decision: "approve",
-        amendmentId: account.amendment.id,
-      })
+      await request(
+        `/instructor/users/${"user-student-demo"}/business-amendment`,
+        {
+          decision: "approve",
+          amendmentId: account.amendment.id,
+        },
+      )
     ).status,
     409,
   );

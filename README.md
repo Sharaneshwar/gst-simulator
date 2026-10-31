@@ -91,4 +91,32 @@ Reference date: **24 October 2026**. Public pages were compared against the live
 - [Banner asset](https://static.gst.gov.in/uiassets/images/banner/banner_image_large.jpg)
 - [Masthead emblem asset](https://static.gst.gov.in/uiassets/images/Emblem_of_India-white.svg)
 
-This is a local review build, not a claim of complete parity with every GST service. The main registration/returns/payment journeys work, while specialized registrations, multi-state registration, QRMP/IFF, IMS, annual returns, refunds and notices are not implemented. Some invoice/registration fields are simplified, JSON import supports the provided invoice template and single-rate B2B utility records, attachment controls retain file metadata only, and GSTN/signing/bank responses use local dummy values. Email OTP delivery is real; SMS, Aadhaar and DSC hardware are not connected. E-way bill and e-invoice screens implement generation, viewing, printing and cancellation but are not complete replicas of the external portals. Validate these boundaries with the instructor before treating the build as a finished training reference.
+The playground now includes the PDF's principal registration, returns, payment and document workflows. It remains a training application, with dummy GSTN, bank and IRP responses. Email OTP delivery uses the configured mail provider; SMS, Aadhaar authentication and DSC hardware are not connected. Printed QR codes contain practice document details and are not government-signed payloads. IMS, annual returns, refunds, notices and specialized registrations remain outside this PDF implementation.
+
+### PDF practice workflows
+
+- **Historical periods:** FY 2022–23 onward. Filing frequency is selected per financial year. Existing filed years are locked without changing other years or deleting saved work.
+- **QRMP:** optional monthly IFF for registered invoices/notes; PMT-06 deposits; quarter-end GSTR-1 excludes filed IFF records, while GSTR-3B includes the entire quarter. Return records and supplier data lock after filing/offset.
+- **GSTR-1:** itemised tax rates; export shipping details; nil/exempt/non-GST grid; HSN tax totals; document ranges; original-invoice lookup for amendments. Offline utility import includes B2B, B2CL, B2CS, exports, registered/unregistered notes, supported amendments, nil, HSN, documents and advances. Unsupported JSON sections are rejected explicitly.
+- **GSTR-3B:** utility JSON upload, state-wise Table 3.2, editable tables, auto-drafted classifications, ITC reversals, offset and OTP filing. Upload and online preparation use the same stored return.
+- **Supplier documents:** Downloads → Supplier Return Data supports manual entry and JSON loading, including credit/debit notes and explicit inclusion in the month's GSTR-2B. GSTR-2A/2B provide supplier and document drill-down, summaries, JSON export and printing. The PDF's exercise datasets are entered or loaded separately; no assignments or LMS are created.
+- **Registration:** multiple directors/signatories and goods/HSN records, DIN and company details, premises/jurisdiction/proof fields, real persisted PDF/image attachments, TRN resume verification and EVC submission. New applications archive previous applications while retaining the account's existing business and returns.
+- **Payments:** reason, challan type, bank selection, confirmation and single-use email OTP before cash is credited.
+- **Document portals:** separate OTP registration and password login; item-wise e-way bill entry; multi-item totals and transport details; e-way bill `billLists` and e-invoice `Invoices`/IRP JSON bulk upload; error reports, generated-document views, QR previews, printing, identifier lookup and cancellation with remarks.
+
+JSON uploads are limited to 6 MB in the UI. Registration attachments support PDF/PNG/JPEG up to 1 MB per file, with a combined application limit. They are stored with the existing private workspace in the configured database, so production continues to use Neon. No additional deployment environment variables or database migrations are required.
+
+Run `npm test` and `npm run build` from the repository root. Automated tests use isolated temporary SQLite databases and mocked email; they do not send messages or modify production data. The original Tally companion files have now been downloaded privately and checked: five files pass; the GSTR-3B download contains the same GSTR-1 payload as the December GSTR-1 file and is rejected with an explanatory error. See [the validation report](docs/validation-2026-10-25.md) for test results and remaining limits.
+
+The e-way bill portal has its own public home, login theme, CAPTCHA, entry panels, inward/outward supply and document mapping, actual dispatch/ship-to addresses, full unit list, Part A/Part B flow, transport/date checks, validity and cancellation windows. A per-period working date supports historical exercises. Live GSTIN status, HSN/PIN registry and government-signed documents are not connected.
+
+Run `npm --prefix backend run test:neon` only after configuring the separate test branch in `backend/.env.neon-test`; the runner refuses the production endpoint and creates a disposable schema. Validate privately downloaded originals with `node backend/scripts/validate-companion-json.js /path/to/files`. No course source files are committed.
+
+
+### HSN/SAC directory
+
+Registration now follows the official GST Goods/Services picker: search by name or code, a selected-code description table, four-digit goods HSN headings, duplicate checks and limits of five goods plus five services. A visible code-directory button also supports browsing without knowing a code. The same lookup is available in GSTR-1 HSN summaries and document line items. The valid-code snapshot is bundled with the backend, so no GST/Tally credentials, paid API or new environment variables are required. Rates remain separate. See [source, coverage and refresh instructions](docs/hsn-sac-directory.md).
+
+Registration invitations and repeat practice applications are documented in [docs/registration-practice.md](docs/registration-practice.md).
+
+Private home-network and administrator-approved browser access: [docs/network-access.md](docs/network-access.md). Release checks: [docs/release-2026-10-31.md](docs/release-2026-10-31.md).

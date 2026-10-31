@@ -1,14 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Btn,
-  Crumbs,
-  Input,
-  Modal,
-  Panel,
-  Select,
-  Table,
-  usePortal,
-} from "./lib";
+import { Btn, Crumbs, Input, Modal, Panel, Table, usePortal } from "./lib";
 import "./access.css";
 
 const roleLabel = (role) => (role === "instructor" ? "Instructor" : "Student");
@@ -100,13 +91,7 @@ export function UserAccess() {
         <Btn
           onClick={() => {
             setError("");
-            setInvite({
-              name: "",
-              email: "",
-              role: "student",
-              tradeName: "",
-              gstin: "",
-            });
+            setInvite({ email: "" });
           }}
         >
           INVITE USER
@@ -124,8 +109,8 @@ export function UserAccess() {
         }
       >
         <p>
-          Invite students and instructors. Student accounts each represent one
-          business; their email belongs to the person using the account.
+          Invite a student using their email. They enter business details when
+          practising registration and can keep multiple applications.
         </p>
         <div className="access-toolbar">
           <div className="tabs" role="tablist" aria-label="Account status">
@@ -157,7 +142,7 @@ export function UserAccess() {
             type="search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Business, email or role"
+            placeholder="Email, business or role"
           />
         </div>
         {loading ? (
@@ -168,7 +153,7 @@ export function UserAccess() {
             columns={
               tab === "onboarded"
                 ? [
-                    "Business / Name",
+                    "Account / Business",
                     "Email",
                     "Role",
                     "First accessed (IST)",
@@ -177,7 +162,7 @@ export function UserAccess() {
                     "Details",
                   ]
                 : [
-                    "Business / Name",
+                    "Account / Business",
                     "Email",
                     "Role",
                     "Invited (IST)",
@@ -319,28 +304,6 @@ export function UserAccess() {
               }
             }}
           >
-            <Select
-              label="Role"
-              required
-              value={invite.role}
-              options={[
-                ["student", "Student"],
-                ["instructor", "Instructor"],
-              ]}
-              onChange={(e) => setInvite({ ...invite, role: e.target.value })}
-            />
-            <Input
-              label={
-                invite.role === "student"
-                  ? "Legal Name of Business"
-                  : "Instructor Name"
-              }
-              required
-              maxLength={80}
-              minLength={2}
-              value={invite.name}
-              onChange={(e) => setInvite({ ...invite, name: e.target.value })}
-            />
             <Input
               label="Contact / Login Email"
               required
@@ -349,30 +312,6 @@ export function UserAccess() {
               value={invite.email}
               onChange={(e) => setInvite({ ...invite, email: e.target.value })}
             />
-            {invite.role === "student" && (
-              <>
-                <Input
-                  label="Trade Name (optional)"
-                  maxLength={80}
-                  value={invite.tradeName}
-                  onChange={(e) =>
-                    setInvite({ ...invite, tradeName: e.target.value })
-                  }
-                />
-                <Input
-                  label="Dummy GSTIN (optional)"
-                  maxLength={15}
-                  value={invite.gstin}
-                  onChange={(e) =>
-                    setInvite({
-                      ...invite,
-                      gstin: e.target.value.toUpperCase(),
-                    })
-                  }
-                  help="Leave blank to use the default practice GSTIN. Dummy GSTINs can repeat across student accounts."
-                />
-              </>
-            )}
             <p>
               A unique, case-sensitive six-letter password will be emailed to
               this person. They must first sign in within 48 hours.
@@ -479,7 +418,7 @@ export function MyProfile() {
   const [amending, setAmending] = useState(false);
   const [form, setForm] = useState(null);
   const [busy, setBusy] = useState(false);
-  const business = active.state.taxpayer;
+  const business = user.registrationRequired ? {} : active.state.taxpayer;
   async function submit(e, path, body) {
     e.preventDefault();
     setBusy(true);
@@ -540,18 +479,25 @@ export function MyProfile() {
         }
       >
         <Table columns={["Particulars", "Details"]}>
-          {Object.entries(business).map(([key, value]) => (
-            <tr key={key}>
-              <td className="capitalize">{key.replace(/([A-Z])/g, " $1")}</td>
-              <td>{value}</td>
-            </tr>
-          ))}
+          {Object.entries(business)
+            .filter(
+              ([key]) =>
+                !["registrationHome", "registrationRequired"].includes(key),
+            )
+            .map(([key, value]) => (
+              <tr key={key}>
+                <td className="capitalize">{key.replace(/([A-Z])/g, " $1")}</td>
+                <td>{value}</td>
+              </tr>
+            ))}
         </Table>
-        {user.role === "student" ? (
+        {user.registrationRequired ? (
+          <p>Complete a registration to see business details here.</p>
+        ) : user.role === "student" ? (
           <>
             <p>
-              Your account is linked to this business. All supported return
-              periods and documents are available within it.
+              This is your selected business. Its return periods and documents
+              stay separate from your other practice businesses.
             </p>
             <p>
               Legal and trade names are registration core fields. Submit an

@@ -8,7 +8,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test test/*.test.js",
-    "test:neon": "node --require ./test/neon-env.cjs --test --test-concurrency=1 test/access.test.js test/portal.test.js",
+    "test:neon": "node scripts/test-neon.js",
     "db:import-sqlite": "node scripts/import-sqlite.js"
   },
   "dependencies": {

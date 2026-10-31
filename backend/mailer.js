@@ -8,6 +8,9 @@ const PURPOSE_NAMES = {
   "registration-submit": "Submit your registration application",
   "gstr1-file": "File GSTR-1",
   "gstr3b-file": "File GSTR-3B",
+  "bank-payment": "Confirm your bank payment",
+  "eway-registration": "e-Way Bill portal registration",
+  "einvoice-registration": "e-Invoice portal registration",
   "delivery-test": "Email delivery verification",
 };
 

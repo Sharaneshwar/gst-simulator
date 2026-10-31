@@ -9,8 +9,16 @@ require("dotenv").config({
   quiet: true,
 });
 const { createDatabase } = require("./database");
+const { createNetworkAccess } = require("./network-access");
+const { mountHsnMaster } = require("./hsn-master");
 const { migrateDatabase } = require("./migrate");
-const { mountPortal, viewState } = require("./portal-engine");
+const { practiceGstin } = require("./registration-flow");
+const {
+  mountPortal,
+  viewState,
+  publicState,
+  ensureWorkspace,
+} = require("./portal-engine");
 const { createMailer } = require("./mailer");
 const { createOtpService } = require("./otp-service");
 const {
@@ -33,9 +41,10 @@ const PASSWORD_SALT =
   process.env.PASSWORD_SALT || "gst-practice-portal-demo-salt";
 const db = createDatabase();
 const app = express();
+const networkAccess = createNetworkAccess({ db });
 app.locals.mailer = createMailer();
 app.locals.sendInvitation = createInvitationMailer();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "8mb" }));
 
 const CASES = [
   {
@@ -367,6 +376,7 @@ async function setupDatabase() {
     CREATE TABLE IF NOT EXISTS case_definitions (slug TEXT PRIMARY KEY, position INTEGER NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, period TEXT NOT NULL, sector TEXT NOT NULL, seed_json TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS user_case_state (user_id TEXT NOT NULL, case_slug TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 0, state_json TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (user_id, case_slug), FOREIGN KEY (user_id) REFERENCES users(id), FOREIGN KEY (case_slug) REFERENCES case_definitions(slug));`);
   await initializeAccess(db);
+  await networkAccess.initialize();
   if (db.dialect === "sqlite") {
     const columns = db.prepare("PRAGMA table_info(user_case_state)").all();
     if (!columns.some((column) => column.name === "revision"))
@@ -446,6 +456,17 @@ async function ensureStates(userId) {
   let cases = await db
     .prepare("SELECT * FROM case_definitions ORDER BY position")
     .all();
+  // Registration-created businesses are private: never seed them for other users.
+  const owned = new Set(
+    (
+      await db
+        .prepare("SELECT case_slug FROM user_case_state WHERE user_id = ?")
+        .all(userId)
+    ).map((row) => row.case_slug),
+  );
+  cases = cases.filter(
+    (item) => !item.slug.startsWith("practice-") || owned.has(item.slug),
+  );
   if (user.role === "student" || !ENABLE_CASE_LIBRARY) {
     const previous = await db
       .prepare(
@@ -503,6 +524,30 @@ async function ensureStates(userId) {
         }),
         now(),
       );
+    if (
+      !existing.has(item.slug) &&
+      parse(user.business_json)?.registrationRequired
+    ) {
+      const blank = seedState({
+        ...parse(item.seed_json),
+        taxpayer: {
+          legalName: "",
+          tradeName: "",
+          gstin: "",
+          pan: "",
+          state: "",
+          registrationRequired: true,
+        },
+        salesInvoices: [],
+        purchaseInvoices: [],
+        ledgers: { cash: 0, credit: 0 },
+      });
+      await db
+        .prepare(
+          "UPDATE user_case_state SET state_json = ? WHERE user_id = ? AND case_slug = ?",
+        )
+        .run(JSON.stringify(blank), userId, item.slug);
+    }
   }
   if (
     !(await db
@@ -521,7 +566,9 @@ async function ensureStates(userId) {
 async function caseRows(userId) {
   await ensureStates(userId);
   const user = await db
-    .prepare("SELECT role, business_slug FROM users WHERE id = ?")
+    .prepare(
+      "SELECT role, business_slug, business_json FROM users WHERE id = ?",
+    )
     .get(userId);
   return (
     await db
@@ -532,8 +579,111 @@ async function caseRows(userId) {
   ).filter(
     (row) =>
       (ENABLE_CASE_LIBRARY && user.role !== "student") ||
-      row.slug === user.business_slug,
+      row.slug === user.business_slug ||
+      row.slug === parse(user.business_json)?.registrationHome ||
+      row.slug.startsWith("practice-"),
   );
+}
+function applicationList(rows) {
+  const applications = new Map();
+  for (const row of rows) {
+    const workspace = (row.state || parse(row.state_json))?.workspace;
+    for (const r of [
+      workspace?.registration,
+      ...(workspace?.registrationHistory || []),
+    ]) {
+      if (!r || !r.partA?.legalName || (!r.trn && !r.createdAt)) continue;
+      const key = r.trn || r.id || `${row.slug}:${r.createdAt}`;
+      const item = {
+        reference: r.arn || r.trn || r.id,
+        trn: r.trn,
+        arn: r.arn,
+        legalName: r.partA.legalName,
+        tradeName: r.tabs?.business?.tradeName || "",
+        createdAt: r.createdAt,
+        submittedAt: r.submittedAt,
+        status: r.stage,
+        caseSlug: row.slug,
+        businessSlug: r.businessSlug,
+      };
+      if (!applications.has(key) || row.slug === r.businessSlug)
+        applications.set(key, item);
+    }
+  }
+  return [...applications.values()].sort((a, b) =>
+    String(b.createdAt).localeCompare(String(a.createdAt)),
+  );
+}
+async function completeRegistration(ctx) {
+  const r = ctx.active.state.workspace.registration;
+  const slug = `practice-${id()}`;
+  const current = await db
+    .prepare("SELECT business_json FROM users WHERE id = ?")
+    .get(ctx.user.id);
+  const previous = parse(current.business_json);
+  const business = {
+    legalName: r.partA.legalName,
+    tradeName: r.tabs.business.tradeName,
+    pan: r.partA.pan,
+    state: r.partA.state,
+    email: ctx.user.email,
+    gstin: practiceGstin(r.partA.state, r.partA.pan),
+    registrationHome: previous?.registrationHome || ctx.active.slug,
+    filingFrequency: "Monthly",
+    registrationDate: now(),
+  };
+  const definition = {
+    slug,
+    position: 1000,
+    title: business.legalName,
+    description: "Registered practice business",
+    period: ctx.active.period,
+    sector: "General",
+    taxpayer: business,
+    salesInvoices: [],
+    purchaseInvoices: [],
+    ledgers: { cash: 0, credit: 0 },
+  };
+  // One transaction preserves the submitted application and creates its isolated return workspace.
+  await db.transaction(async () => {
+    await db.lock(`business-account:${ctx.user.id}`);
+    r.businessSlug = slug;
+    await saveState(
+      ctx.user.id,
+      ctx.active.slug,
+      ctx.active.state,
+      ctx.active.revision,
+    );
+    await db
+      .prepare(
+        "INSERT INTO case_definitions (slug, position, title, description, period, sector, seed_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        slug,
+        1000,
+        definition.title,
+        definition.description,
+        definition.period,
+        definition.sector,
+        JSON.stringify(definition),
+      );
+    const state = seedState(definition);
+    const workspace = ensureWorkspace(state, definition.period);
+    workspace.registration = structuredClone(r);
+    await db
+      .prepare("UPDATE user_case_state SET is_active = 0 WHERE user_id = ?")
+      .run(ctx.user.id);
+    await db
+      .prepare(
+        "INSERT INTO user_case_state (user_id, case_slug, is_active, state_json, updated_at) VALUES (?, ?, 1, ?, ?)",
+      )
+      .run(ctx.user.id, slug, JSON.stringify(state), now());
+    await db
+      .prepare(
+        "UPDATE users SET business_slug = ?, business_json = ? WHERE id = ?",
+      )
+      .run(slug, JSON.stringify(business), ctx.user.id);
+  })();
 }
 function hydrateRow(row) {
   return {
@@ -543,9 +693,22 @@ function hydrateRow(row) {
   };
 }
 async function getActiveCase(userId) {
-  const row = (await caseRows(userId)).find((item) => item.is_active);
+  // Login initializes workspaces. Normal actions should load only the active one,
+  // rather than every business and its full JSON state on every request.
+  const read = () =>
+    db
+      .prepare(
+        "SELECT d.slug, d.title, d.description, d.period, d.sector, s.is_active, s.state_json, s.updated_at, s.revision FROM user_case_state s JOIN case_definitions d ON d.slug = s.case_slug JOIN users u ON u.id = s.user_id WHERE s.user_id = ? AND s.is_active = 1 AND ((? = 1 AND u.role != 'student') OR s.case_slug = u.business_slug) ORDER BY d.position LIMIT 1",
+      )
+      .get(userId, ENABLE_CASE_LIBRARY ? 1 : 0);
+  let row = await read();
+  if (!row) {
+    await ensureStates(userId);
+    row = await read();
+  }
   return row ? hydrateRow(row) : null;
 }
+
 async function saveState(userId, slug, state, revision) {
   const result = await db
     .prepare(
@@ -658,6 +821,10 @@ function publicCase(row) {
   const { state, state_json, ...metadata } = row;
   return {
     ...metadata,
+    title: state.taxpayer.registrationRequired
+      ? "Registration applications"
+      : state.taxpayer.legalName || metadata.title,
+    registrationRequired: Boolean(state.taxpayer.registrationRequired),
     summary: {
       invoices: state.salesInvoices.length,
       purchaseInvoices: state.purchaseInvoices.length,
@@ -689,11 +856,17 @@ app.use((req, res, next) => {
     "Access-Control-Allow-Origin",
     allowedOrigin(req.headers.origin),
   );
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Gst-Network-Grant",
+  );
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS");
   if (req.method === "OPTIONS") return res.status(204).end();
   next();
 });
+
+networkAccess.mount(app);
+mountHsnMaster(app);
 
 app.get("/api/health", async (req, res) => {
   await db.prepare("SELECT 1 AS ok").get();
@@ -724,14 +897,12 @@ app.get("/api/instructor/email-status", async (req, res) => {
     await app.locals.mailer.verify();
     res.json({ provider, verified: true });
   } catch (error) {
-    res
-      .status(error.status || 502)
-      .json({
-        provider,
-        verified: false,
-        message:
-          "Email provider verification failed. Check backend credentials and sender approval.",
-      });
+    res.status(error.status || 502).json({
+      provider,
+      verified: false,
+      message:
+        "Email provider verification failed. Check backend credentials and sender approval.",
+    });
   }
 });
 app.get("/api/auth/me", async (req, res) => {
@@ -747,9 +918,59 @@ app.get("/api/portal", async (req, res) => {
     user: safeUser(
       await db.prepare("SELECT * FROM users WHERE id = ?").get(user.id),
     ),
-    activeCase: active && { ...publicCase(active), state: active.state },
+    activeCase: active && {
+      ...publicCase(active),
+      state: publicState(active.state),
+    },
     cases: rows.map(publicCase),
+    applications: applicationList(rows),
   });
+});
+app.post("/api/portal/applications/open", async (req, res) => {
+  const user = await requireAuth(req, res);
+  if (!user) return;
+  const rows = await caseRows(user.id);
+  const item = applicationList(rows).find(
+    (item) =>
+      item.reference === req.body.reference || item.trn === req.body.reference,
+  );
+  if (!item)
+    return res
+      .status(404)
+      .json({ message: "Application not found in your account." });
+  const row = rows.find((row) => row.slug === item.caseSlug);
+  const state = parse(row.state_json);
+  const w = ensureWorkspace(state, row.period);
+  if (
+    w.registration.trn !== item.trn ||
+    (!item.trn && w.registration.id !== item.reference)
+  ) {
+    const index = (w.registrationHistory || []).findIndex((r) =>
+      item.trn ? r.trn === item.trn : r.id === item.reference,
+    );
+    if (index < 0)
+      return res
+        .status(404)
+        .json({ message: "Application no longer available." });
+    const [selected] = w.registrationHistory.splice(index, 1);
+    if (w.registration.createdAt) w.registrationHistory.unshift(w.registration);
+    w.registration = selected;
+  }
+  await db.transaction(async () => {
+    await db.lock(`business-account:${user.id}`);
+    await saveState(user.id, row.slug, state, row.revision);
+    await db
+      .prepare(
+        "UPDATE user_case_state SET is_active = CASE WHEN case_slug = ? THEN 1 ELSE 0 END WHERE user_id = ?",
+      )
+      .run(row.slug, user.id);
+    await db
+      .prepare(
+        "UPDATE users SET business_slug = ?, business_json = ? WHERE id = ?",
+      )
+      .run(row.slug, JSON.stringify(state.taxpayer), user.id);
+  })();
+  res.json({ ok: true, stage: w.registration.stage });
 });
 mountPortal(app, {
   activeFor,
@@ -757,28 +978,20 @@ mountPortal(app, {
   requireAuth,
   getActiveCase,
   getOtpService: () => app.locals.otpService,
+  completeRegistration,
 });
 app.post("/api/portal/cases/:slug/activate", async (req, res) => {
   const user = await requireAuth(req, res);
   if (!user) return;
-  const target = await db
-    .prepare("SELECT slug FROM case_definitions WHERE slug = ?")
-    .get(req.params.slug);
+  const target = (await caseRows(user.id)).find(
+    (item) => item.slug === req.params.slug,
+  );
   if (!target)
-    return res.status(404).json({ message: "Business case not found." });
-  await ensureStates(user.id);
-  const bound = await db
-    .prepare("SELECT business_slug FROM users WHERE id = ?")
-    .get(user.id);
-  if (
-    (user.role === "student" || !ENABLE_CASE_LIBRARY) &&
-    target.slug !== bound.business_slug
-  )
-    return res.status(403).json({
-      message:
-        "Your account is linked to one business. All return periods are available within that business.",
-    });
+    return res
+      .status(403)
+      .json({ message: "This business is not available to your account." });
   const transaction = db.transaction(async () => {
+    await db.lock(`business-account:${user.id}`);
     await db
       .prepare("UPDATE user_case_state SET is_active = 0 WHERE user_id = ?")
       .run(user.id);
@@ -787,6 +1000,16 @@ app.post("/api/portal/cases/:slug/activate", async (req, res) => {
         "UPDATE user_case_state SET is_active = 1, updated_at = ? WHERE user_id = ? AND case_slug = ?",
       )
       .run(now(), user.id, target.slug);
+    if (user.role === "student" || !ENABLE_CASE_LIBRARY)
+      await db
+        .prepare(
+          "UPDATE users SET business_slug = ?, business_json = ? WHERE id = ?",
+        )
+        .run(
+          target.slug,
+          JSON.stringify(parse(target.state_json).taxpayer),
+          user.id,
+        );
   });
   await transaction();
   res.json({ ok: true, activeCase: (await getActiveCase(user.id)).slug });
@@ -824,6 +1047,25 @@ app.post("/api/portal/reset", async (req, res) => {
         ).business_json,
       ),
     };
+  if (state.taxpayer.registrationRequired) {
+    state.taxpayer = {
+      legalName: "",
+      tradeName: "",
+      gstin: "",
+      pan: "",
+      state: "",
+      registrationRequired: true,
+    };
+    state.salesInvoices = [];
+    state.purchaseInvoices = [];
+    state.ledgers = { cash: 0, credit: 0 };
+  }
+  const oldWorkspace = active.state.workspace;
+  if (oldWorkspace) {
+    const workspace = ensureWorkspace(state, active.period);
+    workspace.registration = oldWorkspace.registration;
+    workspace.registrationHistory = oldWorkspace.registrationHistory || [];
+  }
   log(
     state,
     "Business case reset",

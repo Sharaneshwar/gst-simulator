@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { RegistrationGoods } from "./hsn-search";
 import {
   Btn,
   Crumbs,
@@ -11,6 +12,7 @@ import {
   Signing,
   Table,
   dateLabel,
+  download,
   usePortal,
 } from "./lib";
 
@@ -138,29 +140,125 @@ const FIELDS = {
   ],
 };
 
+const PERSON_FIELDS = [
+  ["middleName", "Middle Name", "text"],
+  ["lastName", "Last Name", "text"],
+  ["gender", "Gender", ["Male", "Female", "Other"]],
+  ["telephone", "Telephone Number (with STD Code)", "tel"],
+  ["din", "Director Identification Number", "text"],
+  ["citizen", "Are you a citizen of India?", ["Yes", "No"]],
+  ["country", "Country", "text"],
+  ["pincode", "PIN Code", "text"],
+  ["state", "State / UT", "text"],
+  ["district", "District", "text"],
+  ["city", "City / Town / Village", "text"],
+  ["locality", "Locality / Sub Locality", "text"],
+  ["street", "Road / Street", "text"],
+  ["building", "Name of Premises / Building", "text"],
+  ["flat", "Building / Flat Number", "text"],
+  ["floor", "Floor Number", "text"],
+  ["landmark", "Nearby Landmark", "text"],
+];
+FIELDS.business.push(
+  ["additionalTradeName", "Additional Trade Name", "text"],
+  ["casual", "Are you applying as a casual taxable person?", ["No", "Yes"]],
+  ["cin", "Corporate Identity Number (CIN)", "text"],
+  ["registrationType", "Other Registration Type", "text"],
+  ["registrationNumber", "Registration Number", "text"],
+  ["registrationDate", "Date of Registration", "date"],
+);
+FIELDS.promoters.push(...PERSON_FIELDS, [
+  "alsoSignatory",
+  "Also Authorized Signatory",
+  ["Yes", "No"],
+]);
+FIELDS.signatory.push(
+  ["primary", "Primary Authorized Signatory", ["Yes", "No"]],
+  ["dob", "Date of Birth", "date"],
+  ["fatherName", "Father's Name", "text"],
+  ...PERSON_FIELDS,
+  [
+    "proofType",
+    "Proof of Authorized Signatory",
+    [
+      "Letter of Authorization",
+      "Copy of resolution passed by BoD / Managing Committee",
+    ],
+  ],
+);
+FIELDS.principal.push(
+  ["state", "State / UT", "text"],
+  ["floor", "Floor Number", "text"],
+  ["landmark", "Nearby Landmark", "text"],
+  ["jurisdiction", "State Jurisdiction", "text"],
+  ["ward", "Sector / Circle / Ward / Charge / Unit", "text"],
+  ["centreJurisdiction", "Centre Jurisdiction", "text"],
+  ["latitude", "Latitude", "text"],
+  ["longitude", "Longitude", "text"],
+  ["email", "Email Address", "email"],
+  ["mobile", "Mobile Number", "tel"],
+  ["telephone", "Telephone Number", "tel"],
+  [
+    "proofType",
+    "Proof of Principal Place of Business",
+    [
+      "Electricity Bill",
+      "Property Tax Receipt",
+      "Rent / Lease Agreement",
+      "Consent Letter",
+      "Ownership Document",
+    ],
+  ],
+);
+FIELDS.additional.push(
+  ["city", "City / Town / Village", "text"],
+  ["state", "State / UT", "text"],
+  [
+    "possession",
+    "Nature of Possession",
+    ["Own", "Leased", "Rented", "Consent", "Shared", "Others"],
+  ],
+);
+const REPEATED = ["promoters", "signatory", "additional", "goods"];
+const readAttachment = (file) =>
+  new Promise((resolve, reject) => {
+    if (file.size > 1048576) {
+      reject(Error("Select a PDF or image smaller than 1 MB."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () =>
+      resolve({ name: file.name, size: file.size, data: reader.result });
+    reader.onerror = () => reject(Error("Unable to read this file."));
+    reader.readAsDataURL(file);
+  });
+
 export function Registration() {
-  const { user, w, mutate, go, setNotice } = usePortal();
+  const { user, w, mutate, go, setNotice, setError } = usePortal();
   const r = w?.registration;
-  const [kind, setKind] = useState("new");
+  const [kind, setKind] = useState(r?.trn ? "trn" : "new");
+  const draftKey = `gstRegistrationDraft:${user?.id || "guest"}:${r?.id || r?.trn || "new"}`;
   const [a, setA] = useState(() => {
     try {
-      return (
-        JSON.parse(sessionStorage.getItem("gstRegistrationDraft")) ||
-        r?.partA ||
-        {}
-      );
+      return {
+        ...(r?.partA || {}),
+        ...(!r?.createdAt
+          ? JSON.parse(sessionStorage.getItem(draftKey)) || {}
+          : {}),
+        email: user?.email || "",
+      };
     } catch {
-      return {};
+      return { email: user?.email || "" };
     }
   });
   const [mobileOtp, setMobileOtp] = useState("");
   const [emailOtp, setEmailOtp] = useState("");
-  const [trn, setTrn] = useState("");
-  const [email, setEmail] = useState("");
+  const [trn, setTrn] = useState(r?.trn || "");
+  const [email, setEmail] = useState(r?.partA.email || user?.email || "");
   const [resumeOtp, setResumeOtp] = useState(null);
-  const [apps, setApps] = useState(false);
   const [edit, setEdit] = useState(false);
   const [tab, setTab] = useState("business");
+  const [recordIndex, setRecordIndex] = useState(0);
   const [values, setValues] = useState(r?.tabs.business || {});
   const [declaration, setDeclaration] = useState(false);
   const [signing, setSigning] = useState(false);
@@ -168,7 +266,7 @@ export function Registration() {
   const updateA = (key, value) => {
     const next = { ...a, [key]: value };
     setA(next);
-    sessionStorage.setItem("gstRegistrationDraft", JSON.stringify(next));
+    sessionStorage.setItem(draftKey, JSON.stringify(next));
   };
   const start = async () => {
     if (!user) {
@@ -176,14 +274,58 @@ export function Registration() {
       go("login");
       return;
     }
-    await mutate("registration/start", { partA: a });
+    await mutate("registration/start", { partA: { ...a, email: user.email } });
+    sessionStorage.removeItem(draftKey);
     setMobileOtp("");
     setEmailOtp("");
   };
+  const defaults = (key, fields = {}) => ({
+    ...(key === "business"
+      ? {
+          district: r?.partA.district || "",
+          tradeName: r?.partA.legalName || "",
+        }
+      : {}),
+    ...(["principal", "additional"].includes(key)
+      ? {
+          state: r?.partA.state || "",
+          ...(key === "principal" ? { district: r?.partA.district || "" } : {}),
+        }
+      : {}),
+    ...(["promoters", "signatory", "principal"].includes(key)
+      ? { email: user?.email || "", mobile: r?.partA.mobile || "" }
+      : {}),
+    ...fields,
+  });
   function selectTab(key) {
+    setRecordIndex(0);
     setTab(key);
-    setValues(r.tabs[key] || {});
+    setValues(defaults(key, r.tabs[key]));
   }
+  function setField(key, value) {
+    setValues((old) => {
+      const next = { ...old, [key]: value };
+      if (old.records)
+        next.records = old.records.map((r, i) =>
+          i === recordIndex ? { ...r, [key]: value } : r,
+        );
+      return next;
+    });
+  }
+  function addRecord() {
+    const records = values.records || [{ ...values }];
+    if (records.length >= 20) throw Error("Add at most 20 records.");
+    const next = [...records, defaults(tab)];
+    setRecordIndex(next.length - 1);
+    setValues({ records: next });
+  }
+  const valuesForSave = () =>
+    values.records
+      ? {
+          ...defaults(tab, values.records[0]),
+          records: values.records.map((record) => defaults(tab, record)),
+        }
+      : defaults(tab, values);
   if (r?.stage === "Pending for Validation")
     return (
       <div className="container">
@@ -207,7 +349,25 @@ export function Registration() {
             <Btn tone="secondary" onClick={() => window.print()}>
               PRINT ACKNOWLEDGEMENT
             </Btn>
-            <Btn onClick={() => go("track")}>TRACK APPLICATION STATUS</Btn>
+            <Btn onClick={() => go("dashboard")}>OPEN BUSINESS DASHBOARD</Btn>
+            <Btn tone="secondary" onClick={() => go("track")}>
+              TRACK APPLICATION STATUS
+            </Btn>
+            <Btn
+              tone="secondary"
+              onClick={async () => {
+                await mutate("registration/new");
+                sessionStorage.removeItem(draftKey);
+                sessionStorage.removeItem(
+                  `gstRegistrationDraft:${user.id}:new`,
+                );
+                setA({ email: user.email });
+                setEdit(false);
+                setValues({});
+              }}
+            >
+              NEW REGISTRATION
+            </Btn>
           </div>
         </Panel>
       </div>
@@ -252,34 +412,143 @@ export function Registration() {
               State: <b>{r.partA.state}</b>
             </span>
           </div>
-          <div className="form-grid">
-            {FIELDS[tab].map(([key, label, type, required]) =>
-              Array.isArray(type) ? (
-                <Select
-                  key={key}
-                  label={label}
-                  required={required}
-                  options={type}
-                  value={values[key] || ""}
-                  onChange={(e) =>
-                    setValues({ ...values, [key]: e.target.value })
-                  }
-                />
-              ) : (
-                <Input
-                  key={key}
-                  label={label}
-                  required={required}
-                  type={type}
-                  value={values[key] || ""}
-                  onChange={(e) =>
-                    setValues({ ...values, [key]: e.target.value })
-                  }
-                />
-              ),
-            )}
-          </div>
-          {["promoters", "signatory", "principal"].includes(tab) && (
+          {REPEATED.includes(tab) && tab !== "goods" && (
+            <div className="record-list">
+              <p>
+                {tab === "goods" ? "Goods / services" : "Records"}:{" "}
+                {values.records?.length || 1}
+              </p>
+              {values.records?.map((record, i) => (
+                <button
+                  key={i}
+                  className={`btn ${i === recordIndex ? "primary" : "secondary"}`}
+                  onClick={() => {
+                    setRecordIndex(i);
+                    setValues({
+                      ...defaults(tab, record),
+                      records: values.records,
+                    });
+                  }}
+                >
+                  {record.name || record.hsn || `Record ${i + 1}`}
+                </button>
+              ))}
+              <Btn tone="secondary" onClick={addRecord}>
+                ADD NEW
+              </Btn>
+              {values.records?.length > 1 && (
+                <Btn
+                  tone="danger"
+                  onClick={() => {
+                    const records = values.records.filter(
+                      (_, i) => i !== recordIndex,
+                    );
+                    setRecordIndex(0);
+                    setValues({ ...records[0], records });
+                  }}
+                >
+                  REMOVE RECORD
+                </Btn>
+              )}
+            </div>
+          )}
+          {tab === "signatory" && (
+            <div className="actions">
+              <Btn
+                tone="secondary"
+                onClick={() => {
+                  const promoter =
+                    r.tabs.promoters?.records?.find(
+                      (p) => p.alsoSignatory === "Yes",
+                    ) || r.tabs.promoters;
+                  if (promoter)
+                    setValues({
+                      ...promoter,
+                      primary: "Yes",
+                      records: undefined,
+                    });
+                }}
+              >
+                COPY PROMOTER DETAILS
+              </Btn>
+            </div>
+          )}
+          {tab === "goods" ? (
+            <RegistrationGoods values={values} onChange={setValues} />
+          ) : (
+            <div className="form-grid">
+              {FIELDS[tab].map(([key, label, type, required]) =>
+                (tab === "aadhaar" && key === "person") ||
+                (tab === "verification" && key === "signatory") ? (
+                  tab === "aadhaar" && values.opted !== "Yes" ? null : (
+                    <Select
+                      key={key}
+                      label={label}
+                      required
+                      disabled={!w.registrationSignatories?.length}
+                      placeholder={
+                        w.registrationSignatories?.length
+                          ? "Select authorized signatory"
+                          : "Add an authorized signatory first"
+                      }
+                      help={
+                        !w.registrationSignatories?.length
+                          ? "Save the Authorized Signatory section to populate this list."
+                          : ""
+                      }
+                      options={w.registrationSignatories || []}
+                      value={(() => {
+                        const current =
+                          tab === "verification"
+                            ? values.signatoryId || values[key]
+                            : values[key];
+                        const people = w.registrationSignatories || [];
+                        const exact = people.find(
+                          (person) => person.value === current,
+                        );
+                        if (exact) return exact.value;
+                        const matches = people.filter((person) =>
+                          person.aliases?.includes(current),
+                        );
+                        return matches.length === 1 ? matches[0].value : "";
+                      })()}
+                      onChange={(e) => {
+                        setField(key, e.target.value);
+                        if (tab === "verification")
+                          setField("signatoryId", e.target.value);
+                      }}
+                    />
+                  )
+                ) : Array.isArray(type) ? (
+                  <Select
+                    key={key}
+                    label={label}
+                    required={required}
+                    options={type}
+                    value={values[key] ?? defaults(tab)[key] ?? ""}
+                    onChange={(e) => setField(key, e.target.value)}
+                  />
+                ) : (
+                  <Input
+                    key={key}
+                    label={label}
+                    required={required}
+                    type={type}
+                    readOnly={tab === "principal" && key === "state"}
+                    value={values[key] ?? defaults(tab)[key] ?? ""}
+                    onChange={(e) => setField(key, e.target.value)}
+                  />
+                ),
+              )}
+            </div>
+          )}
+          {[
+            "business",
+            "promoters",
+            "signatory",
+            "principal",
+            "additional",
+          ].includes(tab) && (
             <div className="document-attachment">
               <Input
                 label={
@@ -289,19 +558,33 @@ export function Registration() {
                 }
                 type="file"
                 accept=".pdf,.jpg,.jpeg,.png"
-                onChange={(e) => {
+                onChange={async (e) => {
                   const file = e.target.files[0];
-                  if (file)
-                    setValues({
-                      ...values,
-                      attachment: { name: file.name, size: file.size },
-                    });
+                  if (!file) return;
+                  try {
+                    setField("attachment", await readAttachment(file));
+                  } catch (error) {
+                    setError(error.message);
+                  }
                 }}
               />
               {values.attachment && (
                 <p>
                   Attached: <b>{values.attachment.name}</b> (
                   {Math.ceil(values.attachment.size / 1024)} KB)
+                  {values.attachment.data && (
+                    <Btn
+                      tone="secondary"
+                      onClick={() => {
+                        const link = document.createElement("a");
+                        link.href = values.attachment.data;
+                        link.download = values.attachment.name;
+                        link.click();
+                      }}
+                    >
+                      DOWNLOAD
+                    </Btn>
+                  )}
                 </p>
               )}
             </div>
@@ -326,15 +609,17 @@ export function Registration() {
             <Btn
               tone="secondary"
               onClick={() => {
-                setEdit(false);
-                setApps(true);
+                go("track");
               }}
             >
               BACK TO APPLICATIONS
             </Btn>
             <Btn
               onClick={async () => {
-                await mutate("registration/save", { tab, values });
+                await mutate("registration/save", {
+                  tab,
+                  values: valuesForSave(),
+                });
                 const i = REG_TABS.findIndex(([key]) => key === tab);
                 if (i < REG_TABS.length - 1) selectTab(REG_TABS[i + 1][0]);
               }}
@@ -363,43 +648,32 @@ export function Registration() {
         )}
       </div>
     );
-  if (apps && r?.trn)
-    return (
-      <div className="container">
-        <Crumbs items={["Registration", "My Saved Applications"]} />
-        <Panel title="My Saved Applications">
-          <Table
-            columns={[
-              "Form No.",
-              "Form Description",
-              "Date of Creation",
-              "Status",
-              "Action",
-            ]}
-          >
-            <tr>
-              <td>GST REG-01</td>
-              <td>Application for Registration</td>
-              <td>{dateLabel(new Date())}</td>
-              <td>Draft</td>
-              <td>
-                <Btn
-                  onClick={() => {
-                    setEdit(true);
-                    selectTab("business");
-                  }}
-                >
-                  EDIT ✎
-                </Btn>
-              </td>
-            </tr>
-          </Table>
-        </Panel>
-      </div>
-    );
   return (
     <div className="container">
       <Crumbs items={["Registration"]} />
+      {r?.createdAt && (
+        <div className="actions">
+          <Btn tone="secondary" onClick={() => go("track")}>
+            MY APPLICATIONS
+          </Btn>
+          <Btn
+            tone="secondary"
+            onClick={async () => {
+              await mutate("registration/new");
+              sessionStorage.removeItem(draftKey);
+              sessionStorage.removeItem(`gstRegistrationDraft:${user.id}:new`);
+              setA({ email: user.email });
+              setKind("new");
+              setTrn("");
+              setResumeOtp(null);
+              setEdit(false);
+              setValues({});
+            }}
+          >
+            NEW REGISTRATION
+          </Btn>
+        </div>
+      )}
       <section className="white-page registration-page">
         <div className="stepper">
           <div className={r?.stage !== "otp" ? "active" : "done"}>
@@ -418,7 +692,9 @@ export function Registration() {
           <h1>
             {r?.stage === "otp" || resumeOtp !== null
               ? "OTP Verification"
-              : "New Registration"}
+              : kind === "trn"
+                ? "Temporary Reference Number (TRN)"
+                : "New Registration"}
           </h1>
           <p className="mandatory">
             <b className="required">●</b> indicates mandatory fields
@@ -456,7 +732,7 @@ export function Registration() {
                       mobileOtp,
                       emailOtp,
                     });
-                    sessionStorage.removeItem("gstRegistrationDraft");
+                    sessionStorage.removeItem(draftKey);
                   }}
                 >
                   PROCEED
@@ -516,7 +792,8 @@ export function Registration() {
                       otp: resumeOtp,
                     });
                     setResumeOtp(null);
-                    setApps(true);
+                    setEdit(true);
+                    selectTab("business");
                   }}
                 >
                   PROCEED
@@ -556,8 +833,8 @@ export function Registration() {
                   <Input
                     label="Email Address"
                     required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                    value={email || user?.email || ""}
+                    readOnly
                   />
                   <Input
                     label="Type the characters you see in the image below"
@@ -607,6 +884,7 @@ export function Registration() {
                   />
                   <Input
                     label="District"
+                    required
                     value={a.district || ""}
                     onChange={(e) => updateA("district", e.target.value)}
                   />
@@ -631,10 +909,9 @@ export function Registration() {
                     label="Email Address"
                     type="email"
                     required
-                    value={a.email || ""}
-                    placeholder="Enter Email Address"
-                    help="ⓘ OTP will be sent to this Email Address"
-                    onChange={(e) => updateA("email", e.target.value)}
+                    value={user?.email || ""}
+                    readOnly
+                    help="Your account email is used for registration and OTP verification."
                   />
                   <Input
                     label="Mobile Number"
@@ -672,55 +949,107 @@ export function Registration() {
 }
 
 export function TrackApplication() {
-  const { w, user, go } = usePortal();
-  const [reference, setReference] = useState("");
-  const [searched, setSearched] = useState(false);
-  const r = w?.registration;
-  const found = r && [r.arn, r.trn].filter(Boolean).includes(reference.trim());
+  const { portal, user, go, api, load, mutate } = usePortal();
+  const [query, setQuery] = useState("");
+  const [opening, setOpening] = useState("");
+  const applications = (portal?.applications || []).filter((item) =>
+    `${item.legalName} ${item.tradeName} ${item.trn || ""} ${item.arn || ""} ${item.status}`
+      .toLowerCase()
+      .includes(query.trim().toLowerCase()),
+  );
+  const label = (status) =>
+    ({
+      new: "Part A",
+      otp: "Awaiting OTP",
+      trn: "Part B pending",
+      draft: "Draft",
+    })[status] || status;
   return (
     <div className="container">
       <Crumbs items={["Services", "Track Application Status"]} />
+      <div className="dashboard-title">
+        <h1>My Registration Applications</h1>
+        <Btn
+          onClick={async () => {
+            if (!user) return go("login");
+            await mutate("registration/new");
+            sessionStorage.removeItem(`gstRegistrationDraft:${user.id}:new`);
+            go("registration");
+          }}
+        >
+          NEW REGISTRATION
+        </Btn>
+      </div>
       <Panel title="Track Application Status">
-        <div className="search-form">
-          <Input
-            label="ARN / TRN"
-            required
-            value={reference}
-            onChange={(e) => {
-              setReference(e.target.value);
-              setSearched(false);
-            }}
-          />
-          <Btn
-            onClick={() => {
-              if (!user) go("login");
-              else setSearched(true);
-            }}
-          >
-            SEARCH
-          </Btn>
-        </div>
-        {searched &&
-          (found ? (
+        {!user ? (
+          <Btn onClick={() => go("login")}>LOGIN TO VIEW APPLICATIONS</Btn>
+        ) : (
+          <>
+            <Input
+              label="Find an application"
+              type="search"
+              placeholder="Business name, ARN, TRN or status"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
             <Table
-              columns={["Reference Number", "Form", "Legal Name", "Status"]}
+              columns={[
+                "Legal / Trade Name",
+                "TRN",
+                "ARN",
+                "Created",
+                "Status",
+                "Action",
+              ]}
+              count={applications.length}
+              empty="No applications found. Start a new registration to practise."
             >
-              <tr>
-                <td>{reference}</td>
-                <td>GST REG-01</td>
-                <td>{r.partA.legalName}</td>
-                <td>
-                  {r.stage === "Pending for Validation"
-                    ? "Pending for Validation"
-                    : "Draft"}
-                </td>
-              </tr>
+              {applications.map((item) => (
+                <tr key={item.trn || item.reference}>
+                  <td>
+                    <b>{item.legalName}</b>
+                    {item.tradeName && item.tradeName !== item.legalName && (
+                      <small className="access-muted">{item.tradeName}</small>
+                    )}
+                  </td>
+                  <td>{item.trn || "—"}</td>
+                  <td>{item.arn || "—"}</td>
+                  <td>{dateLabel(item.createdAt)}</td>
+                  <td>{label(item.status)}</td>
+                  <td>
+                    <Btn
+                      tone="secondary"
+                      disabled={Boolean(opening)}
+                      onClick={async () => {
+                        setOpening(item.reference);
+                        try {
+                          await api("/portal/applications/open", {
+                            reference: item.reference,
+                          });
+                          await load();
+                          go(
+                            item.status === "Pending for Validation" ||
+                              item.status === "Approved"
+                              ? "registration"
+                              : "registration/resume",
+                          );
+                        } finally {
+                          setOpening("");
+                        }
+                      }}
+                    >
+                      {opening === item.reference
+                        ? "OPENING…"
+                        : item.arn
+                          ? "VIEW"
+                          : "CONTINUE"}
+                    </Btn>
+                  </td>
+                </tr>
+              ))}
             </Table>
-          ) : (
-            <div className="info">
-              No application found for this reference number.
-            </div>
-          ))}
+          </>
+        )}
       </Panel>
     </div>
   );

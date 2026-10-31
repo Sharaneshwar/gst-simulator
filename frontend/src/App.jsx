@@ -1,3 +1,10 @@
+import { networkHeaders } from "./network-client";
+import {
+  OfflineReturn,
+  PurchaseData,
+  SupplierStatement,
+  NilSupplies,
+} from "./workflows";
 import { useEffect, useRef, useState } from "react";
 import { PortalContext, Panel } from "./lib";
 import {
@@ -12,8 +19,6 @@ import {
   ReturnsDashboard,
   Gstr1,
   Gstr1Section,
-  OfflineUpload,
-  Gstr2,
   Gstr3b,
   Ledgers,
   Challans,
@@ -73,6 +78,7 @@ function Shell({ children, ctx }) {
       "Downloads",
       [
         ["Returns Offline Utility", "downloads"],
+        ["Supplier Return Data", "supplier-data"],
         ["GSTR-1 JSON Template", "downloads"],
         ["User Manuals", "help"],
       ],
@@ -130,6 +136,17 @@ function Shell({ children, ctx }) {
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, []);
+  if (route.split("/")[0] === "eway")
+    return (
+      <div className="eway-site">
+        <main id="main-content">{children}</main>
+        <footer className="eway-footer">
+          <span>GST Practice Portal</span>
+          <strong>For educational purposes only.</strong>
+          <button onClick={() => go("dashboard")}>GST Portal</button>
+        </footer>
+      </div>
+    );
   return (
     <div
       className={`site ${contrast ? "high-contrast" : ""}`}
@@ -180,16 +197,17 @@ function Shell({ children, ctx }) {
                 </button>
                 {menu === "profile" && (
                   <div className="profile-menu">
-                    <b>{active?.state.taxpayer.legalName}</b>
+                    <b>{active?.state.taxpayer.legalName || user.email}</b>
                     <span>{user.email}</span>
                     <button onClick={() => go("profile")}>My Profile</button>
+                    <button onClick={() => go("business")}>
+                      Switch Business
+                    </button>
+                    <button onClick={() => go("track")}>My Applications</button>
                     {user.role === "instructor" && (
                       <>
                         <button onClick={() => go("access")}>
                           User Access
-                        </button>
-                        <button onClick={() => go("business")}>
-                          Switch Business
                         </button>
                       </>
                     )}
@@ -370,6 +388,7 @@ export default function App() {
     const res = await fetch(API_BASE + path, {
       method: body === undefined ? "GET" : "POST",
       headers: {
+        ...(await networkHeaders()),
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       },
@@ -379,6 +398,7 @@ export default function App() {
       .json()
       .catch(() => ({ message: "The server returned an invalid response." }));
     if (!res.ok) {
+      if (data.code === "NETWORK_ACCESS_REQUIRED") window.location.reload();
       if (
         authToken &&
         ["ACCOUNT_DISABLED", "SESSION_REVOKED"].includes(data.code)
@@ -477,6 +497,7 @@ export default function App() {
         ...old,
         activeCase: { ...old.activeCase, state: result.state },
       }));
+    if (path.startsWith("registration/")) await load();
     setNotice(result.message || "Details saved successfully.");
     return result;
   }
@@ -513,9 +534,36 @@ export default function App() {
       </div>
     );
   else if (!user && !publicRoutes.includes(parts[0])) content = <Login />;
+  else if (
+    user?.registrationRequired &&
+    ![
+      "home",
+      "dashboard",
+      "login",
+      "registration",
+      "track",
+      "profile",
+      "business",
+      "access",
+      "help",
+      "news",
+      "contact",
+      "about",
+      "policies",
+    ].includes(parts[0])
+  )
+    content = (
+      <div className="container page-space">
+        <Panel title="Complete your registration">
+          <p>Register a business to open its returns, documents and ledgers.</p>
+          <Btn onClick={() => go("registration")}>NEW REGISTRATION</Btn>
+        </Panel>
+      </div>
+    );
   else if (parts[0] === "home") content = <Home />;
   else if (parts[0] === "login") content = <Login />;
-  else if (parts[0] === "registration") content = <Registration />;
+  else if (parts[0] === "registration")
+    content = <Registration key={`${user?.id}:${active?.slug}`} />;
   else if (parts[0] === "track") content = <TrackApplication />;
   else if (parts[0] === "dashboard") content = <Dashboard />;
   else if (parts[0] === "business")
@@ -523,14 +571,20 @@ export default function App() {
   else if (parts[0] === "access") content = <UserAccess />;
   else if (parts[0] === "returns") content = <ReturnsDashboard />;
   else if (parts[0] === "gstr1")
-    content = parts[1] ? (
-      <Gstr1Section key={parts[1] + w.period} section={parts[1]} />
-    ) : (
-      <Gstr1 />
-    );
-  else if (parts[0] === "offline") content = <OfflineUpload />;
+    content =
+      parts[1] === "NIL" ? (
+        <NilSupplies key={w.period} />
+      ) : parts[1] ? (
+        <Gstr1Section key={parts[1] + w.period} section={parts[1]} />
+      ) : (
+        <Gstr1 />
+      );
+  else if (parts[0] === "offline") content = <OfflineReturn />;
+  else if (parts[0] === "offline3b") content = <OfflineReturn type="GSTR-3B" />;
+  else if (parts[0] === "supplier-data")
+    content = <PurchaseData key={w.period} />;
   else if (parts[0] === "gstr2a" || parts[0] === "gstr2b")
-    content = <Gstr2 type={parts[0]} />;
+    content = <SupplierStatement key={parts[0] + w.period} type={parts[0]} />;
   else if (parts[0] === "gstr3b") content = <Gstr3b />;
   else if (parts[0] === "ledgers") content = <Ledgers />;
   else if (parts[0] === "challans") content = <Challans />;
