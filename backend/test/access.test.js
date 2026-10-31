@@ -7,6 +7,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gst-access-test-"));
 process.env.NODE_ENV = "development";
+process.env.GST_SEED_DEMO_USERS = "1";
 process.env.GST_ENABLE_CASE_LIBRARY = "1";
 if (!process.env.GST_TEST_POSTGRES)
   process.env.SQLITE_PATH = path.join(directory, "access.sqlite");
@@ -490,4 +491,20 @@ test("startup preserves invited users, instructor profile edits, and existing pa
   assert.ok(
     (await db.prepare("SELECT COUNT(*) AS n FROM access_audit").get()).n >= 10,
   );
+});
+
+test("disabled demo seeding never recreates a deleted demo account on restart", async () => {
+  const before = (await db.prepare("SELECT COUNT(*) AS count FROM users").get()).count;
+  await db.prepare("DELETE FROM user_case_state WHERE user_id = ?").run("user-student-demo");
+  await db.prepare("DELETE FROM users WHERE id = ?").run("user-student-demo");
+  const child = spawnSync(process.execPath, ["-e", "const s=require('./server'); s.ready.then(()=>s.db.close()).catch(e=>{console.error(e.code||e.message);process.exitCode=1})"], {
+    cwd: path.join(__dirname, ".."),
+    env: { ...process.env, GST_SEED_DEMO_USERS: "0" },
+    encoding: "utf8",
+  });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(await db.prepare("SELECT id FROM users WHERE id = ?").get("user-student-demo"), undefined);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS count FROM users").get()).count, before - 1);
+  assert.equal((await db.prepare("SELECT name FROM users WHERE id = ?").get("user-instructor-demo")).name, "My Instructor");
+  assert.ok(await db.prepare("SELECT id FROM users WHERE id = ?").get(first.user.id));
 });

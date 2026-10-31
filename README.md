@@ -52,6 +52,8 @@ Gmail SMTP remains available for local or SMTP-enabled hosting by setting `MAIL_
 
 Demo logins:
 
+Demo accounts are created only when `GST_SEED_DEMO_USERS=1` in local development/tests. Production startup never creates them; existing invited accounts remain intact.
+
 | Account    | Email                 | Password |
 | ---------- | --------------------- | -------- |
 | Student    | `student@demo.com`    | `12345`  |

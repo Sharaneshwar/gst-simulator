@@ -406,6 +406,10 @@ async function setupDatabase() {
     if (!ENABLE_CASE_LIBRARY && !needed.has(entry.slug)) continue;
     await addCase.run({ ...entry, position, seed_json: JSON.stringify(entry) });
   }
+  // Existing accounts persist. Demo logins are an explicit local/test fixture,
+  // so deleting a live account cannot recreate it on the next deployment.
+  if (process.env.GST_SEED_DEMO_USERS !== "1" || process.env.NODE_ENV === "production")
+    return;
   const addUser = db.prepare(
     "INSERT INTO users (id, name, email, password_hash, role, created_at) VALUES (@id, @name, @email, @password_hash, @role, @created_at) ON CONFLICT(id) DO NOTHING",
   );

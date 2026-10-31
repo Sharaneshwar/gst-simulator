@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const taskDir = fs.mkdtempSync(path.join(os.tmpdir(), "gst-portal-test-"));
 process.env.NODE_ENV = "development";
+process.env.GST_SEED_DEMO_USERS = "1";
 process.env.GST_ENABLE_CASE_LIBRARY = "1";
 if (!process.env.GST_TEST_POSTGRES)
   process.env.SQLITE_PATH = path.join(taskDir, "test.sqlite");
