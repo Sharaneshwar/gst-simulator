@@ -23,7 +23,7 @@ Render rejects app API calls without a valid network grant. Its health endpoint 
 
 ## Approve or revoke a browser
 
-1. In the browser that needs access, open the website, enter a recognizable browser name, and choose **Request browser access**.
+1. In the browser that needs access, open the website, enter a recognizable browser name, and choose **Request browser access**. On the allowed home network, use **Browser access** in the footer (or `/api/network?action=page`) to request an exception before travelling.
 2. Review its request ID and label through the private operator command below.
 3. Approve the exact request ID, then select **Check access** in that browser.
 

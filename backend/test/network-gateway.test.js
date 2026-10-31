@@ -64,6 +64,12 @@ test("middleware gates unknown browsers and private assets, while home network p
 });
 let cookie, id;
 test("same-origin gateway sets private cookies, never approves requests, and rejects cross-site enrollment", async () => {
+  const management = await fetch(edgeUrl + "/api/network?action=page");
+  assert.equal(management.status, 200);
+  const html = await management.text();
+  assert.match(html, /Request browser access/);
+  assert.match(html, /This network is approved/);
+  assert.match(html, /Open portal/);
   const denied = await fetch(edgeUrl + "/api/network?action=enroll", {
     method: "POST",
     headers: {
