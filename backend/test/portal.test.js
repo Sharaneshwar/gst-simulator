@@ -387,11 +387,33 @@ test("registration verifies both OTPs, resumes TRN and requires all tabs", async
     aadhaar: {},
     verification: { signatory: "Example", place: "Bengaluru" },
   };
-  for (const [tab, data] of Object.entries(values))
+  // Reproduce the live drafts: all substantive sections saved, but the two
+  // optional sections were skipped instead of explicitly confirmed as No.
+  for (const [tab, data] of Object.entries(values).filter(
+    ([tab]) => !["representative", "additional"].includes(tab),
+  ))
     assert.equal(
       (await action("registration/save", { tab, values: data })).code,
       200,
     );
+  const blocked = await action("signing/send", {
+    purpose: "registration-submit",
+    signatory: "Example",
+    method: "EVC",
+    email: partA.email,
+  });
+  assert.equal(blocked.code, 400);
+  for (const [tab, data] of [
+    ["representative", { appointed: "No" }],
+    ["additional", { hasAdditional: "No" }],
+  ]) {
+    const saved = await action("registration/save", { tab, values: data });
+    assert.equal(saved.code, 200, saved.message);
+    assert.deepEqual(saved.state.workspace.registration.tabs.verification, {
+      ...values.verification,
+      signatoryId: partA.email,
+    });
+  }
   const submitted = await action("registration/submit", sign);
   assert.equal(submitted.code, 200);
   assert.equal(

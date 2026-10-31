@@ -261,6 +261,7 @@ export function Registration() {
   const [recordIndex, setRecordIndex] = useState(0);
   const [values, setValues] = useState(r?.tabs.business || {});
   const [declaration, setDeclaration] = useState(false);
+  const [finishing, setFinishing] = useState(false);
   const [signing, setSigning] = useState(false);
   const [captcha, setCaptcha] = useState("");
   const updateA = (key, value) => {
@@ -295,8 +296,42 @@ export function Registration() {
     ...(["promoters", "signatory", "principal"].includes(key)
       ? { email: user?.email || "", mobile: r?.partA.mobile || "" }
       : {}),
+    ...(key === "representative" ? { appointed: "No" } : {}),
+    ...(key === "additional" ? { hasAdditional: "No" } : {}),
     ...fields,
   });
+  const missingTabs = REG_TABS.filter(([key]) => !r?.savedTabs?.includes(key));
+  async function saveTab(submit = false) {
+    const result = await mutate("registration/save", {
+      tab,
+      values: valuesForSave(),
+    });
+    const saved = result.state.workspace.registration;
+    const missing = REG_TABS.filter(([key]) => !saved.savedTabs.includes(key));
+    if (submit || finishing || tab === "verification") {
+      setFinishing(true);
+      if (missing.length) {
+        selectTab(missing[0][0]);
+        setNotice(
+          `Details saved. Complete ${missing.map(([, title]) => title).join(", ")} before submitting. Select No if a representative or additional place does not apply.`,
+        );
+      } else if (submit) {
+        setSigning(true);
+      } else {
+        selectTab("verification");
+        setNotice(
+          "All sections saved. Review the declaration, then select SUBMIT WITH EVC / DSC to receive your submission OTP.",
+        );
+      }
+      return;
+    }
+    const i = REG_TABS.findIndex(([key]) => key === tab);
+    if (i < REG_TABS.length - 1) selectTab(REG_TABS[i + 1][0]);
+    else
+      setNotice(
+        "Verification saved. Check the declaration and select SUBMIT WITH EVC / DSC to submit your application.",
+      );
+  }
   function selectTab(key) {
     setRecordIndex(0);
     setTab(key);
@@ -594,6 +629,35 @@ export function Registration() {
               Authentication preference will be recorded with this application.
             </p>
           )}
+          {tab === "verification" &&
+            missingTabs.some(([key]) => key !== "verification") && (
+              <div className="info" role="status">
+                <p>
+                  These sections still need to be saved before submission. For
+                  an optional section, select No if it does not apply.
+                </p>
+                <div className="actions">
+                  {missingTabs
+                    .filter(([key]) => key !== "verification")
+                    .map(([key, title]) => (
+                      <Btn
+                        key={key}
+                        tone="secondary"
+                        onClick={async () => {
+                          await mutate("registration/save", {
+                            tab,
+                            values: valuesForSave(),
+                          });
+                          setFinishing(true);
+                          selectTab(key);
+                        }}
+                      >
+                        {title}
+                      </Btn>
+                    ))}
+                </div>
+              </div>
+            )}
           {tab === "verification" && (
             <label className="check-line">
               <input
@@ -614,25 +678,11 @@ export function Registration() {
             >
               BACK TO APPLICATIONS
             </Btn>
-            <Btn
-              onClick={async () => {
-                await mutate("registration/save", {
-                  tab,
-                  values: valuesForSave(),
-                });
-                const i = REG_TABS.findIndex(([key]) => key === tab);
-                if (i < REG_TABS.length - 1) selectTab(REG_TABS[i + 1][0]);
-              }}
-            >
-              SAVE & CONTINUE
+            <Btn onClick={() => saveTab()}>
+              {tab === "verification" ? "SAVE DETAILS" : "SAVE & CONTINUE"}
             </Btn>
             {tab === "verification" && (
-              <Btn
-                disabled={
-                  !declaration || r.savedTabs.length !== REG_TABS.length
-                }
-                onClick={() => setSigning(true)}
-              >
+              <Btn disabled={!declaration} onClick={() => saveTab(true)}>
                 SUBMIT WITH EVC / DSC
               </Btn>
             )}
