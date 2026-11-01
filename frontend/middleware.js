@@ -1,9 +1,22 @@
+import { randomBytes } from "node:crypto";
+import { adminPage, adminHeaders } from "./network/admin-page.js";
 import { next, ipAddress } from "@vercel/functions";
 import { blockedPage, blockedHeaders } from "./network/blocked-page.js";
 export const config = { runtime: "nodejs" };
 export default async function middleware(request) {
-  if (process.env.NETWORK_ACCESS_ENABLED !== "1") return next();
   const url = new URL(request.url);
+  if (url.pathname === "/admin" || url.pathname === "/admin/") {
+    if (request.method !== "GET" && request.method !== "HEAD")
+      return new Response(null, {
+        status: 405,
+        headers: { Allow: "GET, HEAD" },
+      });
+    const nonce = randomBytes(16).toString("base64");
+    return new Response(request.method === "HEAD" ? null : adminPage(nonce), {
+      headers: adminHeaders(nonce),
+    });
+  }
+  if (process.env.NETWORK_ACCESS_ENABLED !== "1") return next();
   if (url.pathname === "/api/network") return next();
   const ip = ipAddress(request);
   const homes = String(process.env.NETWORK_HOME_IPS || "")
@@ -16,7 +29,7 @@ export default async function middleware(request) {
   const origin = process.env.GST_API_ORIGIN;
   if (
     ip &&
-    /(?:^|;\s*)__Host-gst_browser=[A-Za-z0-9_-]{43}(?:;|$)/.test(cookie) &&
+    /(?:^|;\s*)__Host-gst_access=[A-Za-z0-9_-]{43}(?:;|$)/.test(cookie) &&
     key?.length >= 43 &&
     origin
   ) {

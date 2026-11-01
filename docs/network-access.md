@@ -1,46 +1,37 @@
-# Home network and approved-browser access
+# Home network and administrator access
 
-The production website permits the configured home public IP and individually approved browsers. VPN IP addresses are not allowlisted. App login is still required after the network check.
+The portal permits the configured home public IP and valid administrator-unlock sessions. VPN IPs are not individually allowlisted. The ordinary portal account login is still required.
 
-Unauthorized visitors receive a generic HTTP 403 blocked page, without network details or enrollment controls. The browser-access page and enrollment endpoint are restricted to the allowed home network or an already-approved browser. A browser on an allowed connection can request approval, but cannot approve itself. Approval/revocation is available only through the private server operator tool, with database credentials. A student or an instructor using the app's demo login cannot grant browser exceptions.
+## Unlock from any network
 
-## Production configuration
+Open **`/admin`** on the same hostname and browser/profile used for the portal. Enter the private access password and select **Unlock Access**. This creates a 90-day session that remains valid across IP/VPN changes. Clearing site cookies or using another browser/profile requires entering the access password again. This is an access session, not physical-Mac identification.
 
-Set these private server variables on **both Render and Vercel**:
+The route is deliberately not linked from the public blocked page or the app footer. Its password is the protection; knowing the route alone does not unlock the app. The password never appears in frontend code or a URL.
 
-- `NETWORK_ACCESS_ENABLED=1`
-- `NETWORK_HOME_IPS`: comma-separated exact public IP addresses. Update this when the ISP changes the home address.
-- `NETWORK_GATEWAY_SECRET`: the same private, randomly generated 32-byte base64url value on both hosts. Never prefix this key with `VITE_`.
+The old **Browser access** page, pending requests, private device-approval workflow, `__Host-gst_browser` credential, and device-based network grants have been removed. Legacy `network_devices` rows can remain for history, but grant no access.
 
-On Vercel also set:
+## Private configuration
 
-- `GST_API_ORIGIN`: the HTTPS origin of the Render backend, without `/api`.
-- `VITE_NETWORK_ACCESS=1`: public build flag; it contains no secret.
+Keep matching `NETWORK_GATEWAY_SECRET` values on Vercel and Render; keep `NETWORK_ACCESS_ENABLED=1`, the home IP allowlist in `NETWORK_HOME_IPS`, and the existing `GST_API_ORIGIN`, `VITE_NETWORK_ACCESS` and `VITE_API_BASE` settings.
 
-Keep the existing `VITE_API_BASE` pointing to the Render API. The browser obtains short-lived network grants through the same-origin `/api/network` function and sends them with API requests. The new gate does not proxy bulk-upload payloads through Vercel Functions, so existing file-size limits are preserved.
-
-Render rejects app API calls without a valid network grant. Its health endpoint remains public for monitoring and free-tier keepalive. Vercel middleware protects the HTML and static assets. Client IPs come from the official Vercel `ipAddress` helper; arbitrary forwarded-IP headers are not trusted by the Render API.
-
-## Approve or revoke a browser
-
-1. On the allowed home network, use **Browser access** in the footer (or `/api/network?action=page`), enter a recognizable browser name, and choose **Request browser access** before travelling.
-2. Review its request ID and label through the private operator command below.
-3. Approve the exact request ID, then select **Check access** in that browser.
-
-From `backend`, with private server/database environment variables available:
+Configure the access password using the private database operator tool from `backend`:
 
 ```sh
-node scripts/device-access.js list
-node scripts/device-access.js approve <request-id> "Owner Mac — in-app browser"
-node scripts/device-access.js revoke <request-id>
+# Supply the new password through stdin, without putting it into a URL or source code.
+node scripts/network-admin.js set-password
 ```
 
-Approvals last 90 days. The credential is an opaque random 256-bit value in a `Secure`, `HttpOnly`, `SameSite=Strict`, host-only cookie; only its hash is stored in the database. Clearing cookies, using another browser/profile, revocation or expiration requires a new approval. A revoked credential cannot be approved again; request a new credential instead.
+Input is read until EOF; the tool stores a salted scrypt hash in Neon `network_access_settings`. Do not commit passwords or private `.env` files. An optional `NETWORK_ADMIN_PASSWORD_HASH` backend environment variable overrides the database value for isolated tests or managed configuration. No extra Vercel secret is needed.
 
-This is browser authorization, not proof of a physical Mac. A person with the ability to copy browser credentials could transfer the authorization. No browser fingerprint, MAC address or VPN address is treated as device identity.
+Attempts are limited to five per public IP per 15 minutes, plus 100 across all IPs per 15 minutes. Counters live in Neon, so restarting Render does not reset them. A missing password configuration fails closed. Only the trusted same-origin gateway can call the backend unlock route; cross-origin unlock requests are rejected before any credential is issued.
 
-Approved-device grants expire in 60 seconds, with device status checked on each API call. Revocation immediately prevents new middleware/API access. Home grants also expire in 60 seconds; an already issued grant may remain valid until that expiry after a network change. No public HTTP approval endpoint exists.
+Successful unlock creates a random 256-bit `Secure`, `HttpOnly`, `SameSite=Strict`, host-only cookie; only its token hash is stored in `network_access_sessions`. API grants last 60 seconds; revocation and expiration are checked on each request. Unlocking again replaces the existing session in that browser. Site passwords and student data are not changed by network unlock.
 
-## Rollback
+List or revoke a session privately:
 
-Revoke an individual browser using the command above. To intentionally remove all network restrictions, set `NETWORK_ACCESS_ENABLED=0` on both hosts and `VITE_NETWORK_ACCESS=0` on Vercel, then redeploy. That rollback makes the website public again; normal account login remains enforced. The additive `network_devices` table can remain in place when reverting the code.
+```sh
+node scripts/network-admin.js list
+node scripts/network-admin.js revoke <session-id>
+```
+
+Render's health endpoint remains public for UptimeRobot. Other outsiders continue to receive the generic 403 blocked page. Only `/admin` and the protected network API entry point are reachable before network authorization. The admin page has a nonce-based Content Security Policy and no-store caching.

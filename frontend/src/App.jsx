@@ -370,9 +370,6 @@ function Shell({ children, ctx }) {
           <div className="container">
             <span>© 2026 GST Practice Portal</span>
             <strong>For educational purposes only.</strong>
-            {import.meta.env.VITE_NETWORK_ACCESS === "1" && (
-              <a href="/api/network?action=page">Browser access</a>
-            )}
             <span>Best viewed at 1024 × 768 resolution or above</span>
           </div>
         </div>

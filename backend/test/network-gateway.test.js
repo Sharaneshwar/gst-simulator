@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const express = require("express");
 const { createDatabase } = require("../database");
 const { createNetworkAccess } = require("../network-access");
+const { hashPassword } = require("../access-control");
 const db = createDatabase({ NODE_ENV: "development", SQLITE_PATH: ":memory:" });
 let backend, backendUrl, edge, edgeUrl, handler, middleware;
 const secret = "gateway-test-key-".padEnd(43, "s");
@@ -14,6 +15,7 @@ before(async () => {
       NETWORK_ACCESS_ENABLED: "1",
       NETWORK_HOME_IPS: "203.0.113.10",
       NETWORK_GATEWAY_SECRET: secret,
+      NETWORK_ADMIN_PASSWORD_HASH: hashPassword("test-only-admin"),
     },
   });
   await service.initialize();
@@ -23,10 +25,12 @@ before(async () => {
   backend = b.listen(0, "127.0.0.1");
   await new Promise((r) => backend.once("listening", r));
   backendUrl = `http://127.0.0.1:${backend.address().port}`;
-  process.env.NETWORK_ACCESS_ENABLED = "1";
-  process.env.NETWORK_HOME_IPS = "203.0.113.10";
-  process.env.NETWORK_GATEWAY_SECRET = secret;
-  process.env.GST_API_ORIGIN = backendUrl;
+  Object.assign(process.env, {
+    NETWORK_ACCESS_ENABLED: "1",
+    NETWORK_HOME_IPS: "203.0.113.10",
+    NETWORK_GATEWAY_SECRET: secret,
+    GST_API_ORIGIN: backendUrl,
+  });
   handler = (await import("../../frontend/api/network.js")).default;
   middleware = (await import("../../frontend/middleware.js")).default;
   const e = express();
@@ -37,117 +41,116 @@ before(async () => {
   edgeUrl = `http://127.0.0.1:${edge.address().port}`;
 });
 after(async () => {
-  await new Promise((r) => edge.close(r));
-  await new Promise((r) => backend.close(r));
+  if (edge) await new Promise((r) => edge.close(r));
+  if (backend) await new Promise((r) => backend.close(r));
   await db.close();
 });
-const page = (ip, cookie = "") =>
+const page = (ip, cookie = "", path = "/") =>
   middleware(
-    new Request(edgeUrl + "/", { headers: { "x-real-ip": ip, cookie } }),
+    new Request(edgeUrl + path, { headers: { "x-real-ip": ip, cookie } }),
   );
-test("middleware gates unknown browsers and private assets, while home network passes", async () => {
-  const deniedPage = await page("203.0.113.2");
-  assert.equal(deniedPage.status, 403);
-  const deniedHtml = await deniedPage.text();
-  assert.match(deniedHtml, /Sorry, you have been blocked/);
-  assert.doesNotMatch(deniedHtml, /Network access required|Request browser access|Check access|<script|<input/);
-  const asset = await middleware(
-    new Request(edgeUrl + "/assets/app.js", {
-      headers: { "x-real-ip": "203.0.113.2" },
-    }),
-  );
-  assert.equal(asset.status, 403);
+test("outsiders remain blocked except the password-protected admin page", async () => {
+  for (const path of ["/", "/assets/app.js", "/admin/anything"])
+    assert.equal((await page("203.0.113.2", "", path)).status, 403);
+  const denied = await page("203.0.113.2");
+  const html = await denied.text();
+  assert.match(html, /Sorry, you have been blocked/);
+  assert.doesNotMatch(html, /\/admin|Browser access|<script|<input/);
   assert.equal(
     (await page("203.0.113.10")).headers.get("x-middleware-next"),
     "1",
   );
-  const gate = await middleware(
-    new Request(edgeUrl + "/api/network?action=enroll"),
+  const admin = await page("203.0.113.2", "", "/admin");
+  assert.equal(admin.status, 200);
+  const form = await admin.text();
+  assert.match(form, /Administrator access/);
+  assert.match(form, /type="password"/);
+  assert.doesNotMatch(form, /test-only-admin|scrypt\$|NETWORK_GATEWAY_SECRET/);
+  assert.match(admin.headers.get("cache-control"), /no-store/);
+  assert.match(
+    admin.headers.get("content-security-policy"),
+    /script-src 'nonce-/,
   );
-  assert.equal(gate.headers.get("x-middleware-next"), "1");
-});
-let cookie, id;
-test("same-origin gateway sets private cookies, never approves requests, and rejects cross-site enrollment", async () => {
-  // Vercel's response provides send/status/setHeader, but not Express's type().
-  const vercelResponse = {
-    headers: {},
-    setHeader(key, value) { this.headers[key] = value; },
-    status(code) { this.code = code; return this; },
-    send(body) { this.body = body; return this; },
-  };
-  await handler({ method: "GET", query: { action: "page" }, url: "/api/network?action=page", headers: { host: new URL(edgeUrl).host, "x-real-ip": "203.0.113.10" } }, vercelResponse);
-  assert.equal(vercelResponse.code, 200);
-  assert.match(vercelResponse.headers["Content-Type"], /text\/html/);
-  assert.match(vercelResponse.body, /Request browser access/);
-  const management = await fetch(edgeUrl + "/api/network?action=page", { headers: { "x-real-ip": "203.0.113.10" } });
-  assert.equal(management.status, 200);
-  assert.match(management.headers.get("content-type"), /text\/html/);
-  const html = await management.text();
-  assert.match(html, /Request browser access/);
-  assert.match(html, /This network is approved/);
-  assert.match(html, /Open portal/);
-  const denied = await fetch(edgeUrl + "/api/network?action=enroll", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-real-ip": "203.0.113.2",
-      origin: "https://evil.invalid",
-    },
-    body: "{}",
-  });
-  assert.equal(denied.status, 403);
-  const enrolled = await fetch(edgeUrl + "/api/network?action=enroll", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-real-ip": "203.0.113.10",
-      origin: edgeUrl.replace("http:", "https:"),
-    },
-    body: JSON.stringify({ label: "Test browser" }),
-  });
-  assert.equal(enrolled.status, 201);
-  cookie = enrolled.headers.get("set-cookie").split(";")[0];
-  const data = await enrolled.json();
-  id = data.requestId;
-  assert.equal(data.allowed, true);
-  assert.equal(data.status, "pending");
-  assert.equal((await page("203.0.113.2", cookie)).status, 403);
-});
-test("approved browser passes middleware on a different IP; revocation immediately blocks it", async () => {
-  await db
-    .prepare("UPDATE network_devices SET status='approved' WHERE id=?")
-    .run(id);
+  const adminAgain = await page("203.0.113.2", "", "/admin");
+  assert.notEqual(
+    admin.headers.get("content-security-policy"),
+    adminAgain.headers.get("content-security-policy"),
+  );
   assert.equal(
-    (await page("198.51.100.42", cookie)).headers.get("x-middleware-next"),
+    (await middleware(new Request(edgeUrl + "/admin", { method: "POST" })))
+      .status,
+    405,
+  );
+  assert.equal(
+    (await page("203.0.113.2", "", "/api/network?action=unlock")).headers.get(
+      "x-middleware-next",
+    ),
     "1",
   );
-  const session = await fetch(edgeUrl + "/api/network?action=session", {
-    headers: { "x-real-ip": "198.51.100.42", cookie },
-  });
-  assert.equal((await session.json()).allowed, true);
-  await db
-    .prepare("UPDATE network_devices SET status='revoked' WHERE id=?")
-    .run(id);
-  assert.equal((await page("198.51.100.42", cookie)).status, 403);
 });
-
-test("outsiders cannot open enrollment, create pending requests, or inspect browser status", async () => {
-  const beforeCount = (await db.prepare("SELECT COUNT(*) AS count FROM network_devices").get()).count;
-  for (const action of ["page", "session", "enroll"]) {
-    const response = await fetch(edgeUrl + "/api/network?action=" + action, {
-      method: action === "enroll" ? "POST" : "GET",
-      headers: {
-        "Content-Type": "application/json",
-        "x-real-ip": "203.0.113.2",
-        origin: edgeUrl.replace("http:", "https:"),
-      },
-      ...(action === "enroll" ? { body: JSON.stringify({ label: "Outsider" }) } : {}),
+let cookie;
+test("unlock checks the password, rejects cross-site posts, and forwards a secure cookie", async () => {
+  const opts = (password) => ({
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-real-ip": "198.51.100.2",
+      origin: edgeUrl.replace("http:", "https:"),
+    },
+    body: JSON.stringify({ password }),
+  });
+  const cross = opts("test-only-admin");
+  cross.headers.origin = "https://evil.invalid";
+  assert.equal(
+    (await fetch(edgeUrl + "/api/network?action=unlock", cross)).status,
+    403,
+  );
+  const wrong = await fetch(
+    edgeUrl + "/api/network?action=unlock",
+    opts("wrong"),
+  );
+  assert.equal(wrong.status, 401);
+  assert.equal(wrong.headers.get("set-cookie"), null);
+  const unlocked = await fetch(
+    edgeUrl + "/api/network?action=unlock",
+    opts("test-only-admin"),
+  );
+  assert.equal(unlocked.status, 200);
+  assert.match(unlocked.headers.get("cache-control"), /no-store/);
+  cookie = unlocked.headers.get("set-cookie").split(";")[0];
+  assert.match(cookie, /^__Host-gst_access=/);
+  assert.equal((await unlocked.json()).allowed, true);
+});
+test("the unlocked session permits middleware and network grants across VPN IP changes", async () => {
+  assert.equal(
+    (await page("192.0.2.77", cookie)).headers.get("x-middleware-next"),
+    "1",
+  );
+  const result = await fetch(edgeUrl + "/api/network?action=session", {
+    headers: { "x-real-ip": "192.0.2.78", cookie },
+  });
+  assert.equal(result.status, 200);
+  assert.ok((await result.json()).grant);
+  assert.equal((await page("192.0.2.77")).status, 403);
+});
+test("legacy enrollment and browser-approval controls stay removed", async () => {
+  for (const action of ["page", "enroll"]) {
+    const result = await fetch(edgeUrl + "/api/network?action=" + action, {
+      headers: { "x-real-ip": "203.0.113.10" },
     });
-    assert.equal(response.status, 403);
-    const body = await response.text();
-    assert.doesNotMatch(body, /Request browser access|requestId|grant|home network|NETWORK_ACCESS/);
-    if (action === "page") assert.match(body, /Sorry, you have been blocked/);
-    else assert.deepEqual(JSON.parse(body), { message: "Access blocked." });
+    assert.equal(result.status, 403);
+    assert.deepEqual(await result.json(), { message: "Access blocked." });
   }
-  assert.equal((await db.prepare("SELECT COUNT(*) AS count FROM network_devices").get()).count, beforeCount);
+  assert.equal(
+    (await page("192.0.2.77", "__Host-gst_browser=" + "x".repeat(43))).status,
+    403,
+  );
+  const token = cookie.split("=")[1];
+  const { hash } = require("../network-access");
+  await db
+    .prepare(
+      "UPDATE network_access_sessions SET revoked_at=? WHERE token_hash=?",
+    )
+    .run(Date.now(), hash(token));
+  assert.equal((await page("192.0.2.77", cookie)).status, 403);
 });

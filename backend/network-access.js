@@ -1,13 +1,20 @@
 "use strict";
 const crypto = require("node:crypto");
 const net = require("node:net");
-const COOKIE = "__Host-gst_browser";
+const { verifyPassword } = require("./access-control");
+const COOKIE = "__Host-gst_access";
 const LIFETIME = 90 * 86400000;
-const SCHEMA = `CREATE TABLE IF NOT EXISTS network_devices (
- id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, label TEXT NOT NULL,
- status TEXT NOT NULL DEFAULT 'pending', requested_at BIGINT NOT NULL,
- expires_at BIGINT NOT NULL, approved_at BIGINT, approved_by TEXT, last_seen_at BIGINT,
- requested_ip TEXT NOT NULL
+const WINDOW = 15 * 60000;
+const SCHEMA = `CREATE TABLE IF NOT EXISTS network_access_sessions (
+ id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
+ created_at BIGINT NOT NULL, expires_at BIGINT NOT NULL,
+ revoked_at BIGINT, last_seen_at BIGINT, requested_ip TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS network_unlock_limits (
+ key TEXT PRIMARY KEY, attempts INTEGER NOT NULL, window_started BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS network_access_settings (
+ key TEXT PRIMARY KEY, value TEXT NOT NULL
 );`;
 const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const equal = (a, b) =>
@@ -29,27 +36,29 @@ function createNetworkAccess({ db, env = process.env, now = Date.now }) {
   const enabled = () => env.NETWORK_ACCESS_ENABLED === "1";
   const secret = () => env.NETWORK_GATEWAY_SECRET || "";
   const home = (ip) =>
-    net.isIP(ip) &&
-    String(env.NETWORK_HOME_IPS || "")
-      .split(",")
-      .map((v) => v.trim())
-      .includes(ip);
+    Boolean(
+      net.isIP(ip) &&
+        String(env.NETWORK_HOME_IPS || "")
+          .split(",")
+          .map((v) => v.trim())
+          .includes(ip),
+    );
   const gateway = (req) =>
     secret().length >= 43 && equal(req.headers["x-gst-gateway-key"], secret());
   const clientIp = (req) =>
     gateway(req) && net.isIP(req.headers["x-gst-client-ip"] || "")
       ? req.headers["x-gst-client-ip"]
       : "";
-  async function device(req) {
+  const active = (row) =>
+    Boolean(row && !row.revoked_at && Number(row.expires_at) > now());
+  async function accessSession(req) {
     const token = cookieToken(req.headers);
     return token
       ? db
-          .prepare("SELECT * FROM network_devices WHERE token_hash = ?")
+          .prepare("SELECT * FROM network_access_sessions WHERE token_hash = ?")
           .get(hash(token))
       : null;
   }
-  const approved = (row) =>
-    row?.status === "approved" && Number(row.expires_at) > now();
   const sign = (value) =>
     crypto
       .createHmac("sha256", secret())
@@ -84,22 +93,64 @@ function createNetworkAccess({ db, env = process.env, now = Date.now }) {
       data.exp > now() + 61000
     )
       return false;
-    if (data.home) return Boolean(home(data.home));
-    if (!data.device) return false;
-    return approved(
+    if (data.home) return home(data.home);
+    if (!data.session) return false;
+    return active(
       await db
-        .prepare("SELECT * FROM network_devices WHERE id = ?")
-        .get(data.device),
+        .prepare("SELECT * FROM network_access_sessions WHERE id = ?")
+        .get(data.session),
     );
   }
-  const limits = new Map();
+  async function unlockAttempt(ip) {
+    return db.transaction(async () => {
+      await db.lock("network-admin-unlock");
+      const keys = [
+        ["global", 100],
+        ["ip:" + hash(ip), 5],
+      ];
+      const records = [];
+      for (const [key, maximum] of keys) {
+        const row = await db
+          .prepare("SELECT * FROM network_unlock_limits WHERE key = ?")
+          .get(key);
+        if (
+          row &&
+          Number(row.window_started) + WINDOW > now() &&
+          row.attempts >= maximum
+        )
+          return Math.max(
+            1,
+            Math.ceil((Number(row.window_started) + WINDOW - now()) / 1000),
+          );
+        records.push({
+          key,
+          attempts:
+            row && Number(row.window_started) + WINDOW > now()
+              ? row.attempts + 1
+              : 1,
+          start:
+            row && Number(row.window_started) + WINDOW > now()
+              ? Number(row.window_started)
+              : now(),
+        });
+      }
+      for (const row of records)
+        await db
+          .prepare(
+            "INSERT INTO network_unlock_limits (key,attempts,window_started) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET attempts=excluded.attempts,window_started=excluded.window_started",
+          )
+          .run(row.key, row.attempts, row.start);
+      await db
+        .prepare("DELETE FROM network_unlock_limits WHERE window_started < ?")
+        .run(now() - WINDOW);
+      return 0;
+    })();
+  }
   function mount(app) {
     app.use("/api/network", (req, res, next) => {
       res.setHeader("Cache-Control", "no-store, private");
       if (!gateway(req))
-        return res
-          .status(403)
-          .json({ message: "Use the website to request browser access." });
+        return res.status(403).json({ message: "Access blocked." });
       if (!clientIp(req))
         return res
           .status(400)
@@ -108,95 +159,95 @@ function createNetworkAccess({ db, env = process.env, now = Date.now }) {
     });
     const session = async (req, res, includeGrant) => {
       const ip = clientIp(req),
-        row = await device(req);
-      const allowed = Boolean(home(ip) || approved(row));
-      const status = home(ip)
-        ? "home"
-        : row && Number(row.expires_at) <= now()
-          ? "expired"
-          : row?.status || "unknown";
+        row = await accessSession(req),
+        allowed = home(ip) || active(row);
       if (
-        allowed &&
-        row &&
-        approved(row) &&
+        active(row) &&
         (!row.last_seen_at || now() - Number(row.last_seen_at) > 3600000)
       )
         await db
-          .prepare("UPDATE network_devices SET last_seen_at = ? WHERE id = ?")
+          .prepare(
+            "UPDATE network_access_sessions SET last_seen_at = ? WHERE id = ?",
+          )
           .run(now(), row.id);
       res.json({
         enabled: enabled(),
         allowed,
-        status,
-        requestId: row?.id || "",
+        status: home(ip) ? "home" : active(row) ? "unlocked" : "blocked",
         ...(includeGrant && allowed
-          ? { grant: grant(home(ip) ? { home: ip } : { device: row.id }) }
+          ? { grant: grant(home(ip) ? { home: ip } : { session: row.id }) }
           : {}),
       });
     };
     app.post("/api/network/check", (req, res) => session(req, res, false));
     app.get("/api/network/session", (req, res) => session(req, res, true));
-    app.post("/api/network/enroll", async (req, res) => {
-      const previous = await device(req);
-      if (
-        previous &&
-        previous.status !== "revoked" &&
-        Number(previous.expires_at) > now()
-      )
-        return session(req, res, true);
-      const ip = clientIp(req),
-        limit = limits.get(ip);
-      if (limit && limit.until > now() && limit.count >= 3)
-        return res
-          .status(429)
-          .json({ message: "Too many requests. Try again in an hour." });
-      limits.set(
-        ip,
-        limit && limit.until > now()
-          ? { ...limit, count: limit.count + 1 }
-          : { count: 1, until: now() + 3600000 },
-      );
-      if (limits.size > 10000)
-        for (const [key, value] of limits)
-          if (value.until < now()) limits.delete(key);
-      const token = crypto.randomBytes(32).toString("base64url"),
-        id = crypto.randomUUID();
-      const label =
-        String(req.body?.label || "Browser access request")
-          .replace(/[\x00-\x1f]/g, "")
-          .trim()
-          .slice(0, 100) || "Browser access request";
-      await db
-        .prepare(
-          "INSERT INTO network_devices (id, token_hash, label, status, requested_at, expires_at, requested_ip) VALUES (?, ?, ?, 'pending', ?, ?, ?)",
-        )
-        .run(id, hash(token), label, now(), now() + LIFETIME, ip);
-      res.setHeader(
-        "Set-Cookie",
-        `${COOKIE}=${token}; Path=/; Max-Age=${LIFETIME / 1000}; HttpOnly; Secure; SameSite=Strict`,
-      );
-      res
-        .status(201)
-        .json({
-          allowed: Boolean(home(ip)),
-          status: "pending",
-          requestId: id,
-          message:
-            "Request received. An administrator must approve this browser.",
+    app.post("/api/network/unlock", async (req, res, next) => {
+      try {
+        const stored =
+          env.NETWORK_ADMIN_PASSWORD_HASH ||
+          (
+            await db
+              .prepare(
+                "SELECT value FROM network_access_settings WHERE key = ?",
+              )
+              .get("admin_password_hash")
+          )?.value ||
+          "";
+        if (!stored.startsWith("scrypt$"))
+          return res
+            .status(503)
+            .json({ message: "Administrator access is not configured." });
+        const retry = await unlockAttempt(clientIp(req));
+        if (retry) {
+          res.setHeader("Retry-After", retry);
+          return res.status(429).json({
+            message: "Too many attempts. Please try again in 15 minutes.",
+          });
+        }
+        const password =
+          typeof req.body?.password === "string" ? req.body.password : "";
+        if (!verifyPassword(password, stored))
+          return res
+            .status(401)
+            .json({ message: "The administrator password is incorrect." });
+        const token = crypto.randomBytes(32).toString("base64url"),
+          id = crypto.randomUUID(),
+          ip = clientIp(req);
+        await db.transaction(async () => {
+          const previous = await accessSession(req);
+          if (previous && !previous.revoked_at)
+            await db
+              .prepare(
+                "UPDATE network_access_sessions SET revoked_at = ? WHERE id = ?",
+              )
+              .run(now(), previous.id);
+          await db
+            .prepare(
+              "INSERT INTO network_access_sessions (id,token_hash,created_at,expires_at,requested_ip) VALUES (?,?,?,?,?)",
+            )
+            .run(id, hash(token), now(), now() + LIFETIME, ip);
+        })();
+        res.setHeader(
+          "Set-Cookie",
+          `${COOKIE}=${token}; Path=/; Max-Age=${LIFETIME / 1000}; HttpOnly; Secure; SameSite=Strict`,
+        );
+        res.json({
+          allowed: true,
+          status: "unlocked",
+          message: "Access unlocked. You can now open the portal.",
         });
+      } catch (error) {
+        next(error);
+      }
     });
-    // No HTTP approval route exists: approval needs private operator/database access.
     app.use("/api", async (req, res, next) => {
       if (!enabled() || req.path === "/health" || req.method === "OPTIONS")
         return next();
       if (await verifyGrant(req.headers["x-gst-network-grant"])) return next();
-      res
-        .status(403)
-        .json({
-          code: "NETWORK_ACCESS_REQUIRED",
-          message:
-            "Use your home network or an administrator-approved browser.",
-        });
+      res.status(403).json({
+        code: "NETWORK_ACCESS_REQUIRED",
+        message: "Access blocked. Contact the site owner.",
+      });
     });
   }
   return {
