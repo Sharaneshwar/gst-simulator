@@ -6,14 +6,14 @@ const { createDatabase } = require("../database");
 const { createNetworkAccess } = require("../network-access");
 const { hashPassword } = require("../access-control");
 const db = createDatabase({ NODE_ENV: "development", SQLITE_PATH: ":memory:" });
-let backend, backendUrl, edge, edgeUrl, handler, middleware;
+let backend, backendUrl, edge, edgeUrl, handler, middleware, service;
 const secret = "gateway-test-key-".padEnd(43, "s");
 before(async () => {
-  const service = createNetworkAccess({
+  service = createNetworkAccess({
     db,
     env: {
       NETWORK_ACCESS_ENABLED: "1",
-      NETWORK_HOME_IPS: "203.0.113.10",
+      NETWORK_HOME_IPS: "203.0.113.10,49.36.43.71/24",
       NETWORK_GATEWAY_SECRET: secret,
       NETWORK_ADMIN_PASSWORD_HASH: hashPassword("test-only-admin"),
     },
@@ -27,7 +27,7 @@ before(async () => {
   backendUrl = `http://127.0.0.1:${backend.address().port}`;
   Object.assign(process.env, {
     NETWORK_ACCESS_ENABLED: "1",
-    NETWORK_HOME_IPS: "203.0.113.10",
+    NETWORK_HOME_IPS: "203.0.113.10,49.36.43.71/24",
     NETWORK_GATEWAY_SECRET: secret,
     GST_API_ORIGIN: backendUrl,
   });
@@ -153,4 +153,41 @@ test("legacy enrollment and browser-approval controls stay removed", async () =>
     )
     .run(Date.now(), hash(token));
   assert.equal((await page("192.0.2.77", cookie)).status, 403);
+});
+
+// Exercise the real middleware, gateway and signed API-grant flow together.
+test("CIDR home access agrees at Vercel and Render and excludes neighbouring subnets", async () => {
+  for (const ip of [
+    "49.36.43.0",
+    "49.36.43.1",
+    "49.36.43.71",
+    "49.36.43.243",
+    "49.36.43.255",
+  ]) {
+    assert.equal((await page(ip)).headers.get("x-middleware-next"), "1", ip);
+    const response = await fetch(edgeUrl + "/api/network?action=session", {
+      headers: { "x-real-ip": ip },
+    });
+    assert.equal(response.status, 200, ip);
+    const session = await response.json();
+    assert.equal(session.status, "home");
+    assert.equal(session.allowed, true);
+    assert.equal(await service.verifyGrant(session.grant), true);
+    const payload = JSON.parse(
+      Buffer.from(session.grant.split(".")[0], "base64url"),
+    );
+    assert.equal(payload.home, ip);
+  }
+  for (const ip of ["49.36.42.255", "49.36.44.0", "49.36.143.71"]) {
+    assert.equal((await page(ip)).status, 403, ip);
+    assert.equal(
+      (
+        await fetch(edgeUrl + "/api/network?action=session", {
+          headers: { "x-real-ip": ip },
+        })
+      ).status,
+      403,
+      ip,
+    );
+  }
 });

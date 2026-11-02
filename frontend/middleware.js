@@ -1,3 +1,4 @@
+import { matchesIpAllowlist } from "./network/ip-allowlist.js";
 import { randomBytes } from "node:crypto";
 import { adminPage, adminHeaders } from "./network/admin-page.js";
 import { next, ipAddress } from "@vercel/functions";
@@ -19,11 +20,7 @@ export default async function middleware(request) {
   if (process.env.NETWORK_ACCESS_ENABLED !== "1") return next();
   if (url.pathname === "/api/network") return next();
   const ip = ipAddress(request);
-  const homes = String(process.env.NETWORK_HOME_IPS || "")
-    .split(",")
-    .map((v) => v.trim())
-    .filter(Boolean);
-  if (ip && homes.includes(ip)) return next();
+  if (matchesIpAllowlist(ip, process.env.NETWORK_HOME_IPS)) return next();
   const cookie = request.headers.get("cookie") || "";
   const key = process.env.NETWORK_GATEWAY_SECRET;
   const origin = process.env.GST_API_ORIGIN;

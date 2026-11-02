@@ -1,6 +1,7 @@
 "use strict";
 const crypto = require("node:crypto");
 const net = require("node:net");
+const { matchesIpAllowlist } = require("./ip-allowlist");
 const { verifyPassword } = require("./access-control");
 const COOKIE = "__Host-gst_access";
 const LIFETIME = 90 * 86400000;
@@ -35,14 +36,7 @@ function cookieToken(headers) {
 function createNetworkAccess({ db, env = process.env, now = Date.now }) {
   const enabled = () => env.NETWORK_ACCESS_ENABLED === "1";
   const secret = () => env.NETWORK_GATEWAY_SECRET || "";
-  const home = (ip) =>
-    Boolean(
-      net.isIP(ip) &&
-        String(env.NETWORK_HOME_IPS || "")
-          .split(",")
-          .map((v) => v.trim())
-          .includes(ip),
-    );
+  const home = (ip) => matchesIpAllowlist(ip, env.NETWORK_HOME_IPS);
   const gateway = (req) =>
     secret().length >= 43 && equal(req.headers["x-gst-gateway-key"], secret());
   const clientIp = (req) =>
