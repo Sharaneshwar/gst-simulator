@@ -87,6 +87,225 @@ const sign = {
   method: "EVC",
   otp: "123456",
 };
+test("Excel preview is read-only, and reviewed import persists purchases atomically with duplicate protection", async () => {
+  await reset();
+  const ExcelJS = require("exceljs");
+  const book = new ExcelJS.Workbook();
+  const sheet = book.addWorksheet("Purchase Register");
+  sheet.addRow([
+    "Date",
+    "Supplier",
+    "Supplier Invoice No.",
+    "GSTIN/UIN",
+    "Purchase",
+    "Gross Total",
+    "IGST@28%",
+  ]);
+  sheet.addRow([
+    new Date("2026-10-01T00:00:00Z"),
+    "Practice Supplier",
+    "XLSX/TEST1",
+    "27ABCDE1234F1Z0",
+    1000,
+    1180,
+    180,
+  ]);
+  const body = {
+    name: "practice.xlsx",
+    base64: Buffer.from(await book.xlsx.writeBuffer()).toString("base64"),
+    period: "2026-10",
+    target: "sales",
+  };
+  const before = await request("/portal");
+  const inspected = await action("excel/preview", body);
+  assert.equal(inspected.code, 200, inspected.message);
+  assert.equal(inspected.state, undefined);
+  assert.equal(inspected.preview.rows[0].target, "purchases");
+  assert.equal(
+    inspected.preview.rows[0].entry,
+    undefined,
+    "server validation objects are not client input",
+  );
+  assert.deepEqual(
+    (await request("/portal")).activeCase.state,
+    before.activeCase.state,
+  );
+  assert.equal(
+    (
+      await action("excel/import", {
+        ...body,
+        fingerprint: inspected.preview.fingerprint,
+      })
+    ).code,
+    400,
+    "warnings require review",
+  );
+  assert.equal(
+    (
+      await action("excel/import", {
+        ...body,
+        fingerprint: "changed",
+        reviewed: true,
+      })
+    ).code,
+    400,
+  );
+  const imported = await action("excel/import", {
+    ...body,
+    fingerprint: inspected.preview.fingerprint,
+    reviewed: true,
+  });
+  assert.equal(imported.code, 200, imported.message);
+  const saved = imported.state.workspace.periods["2026-10"].purchases.find(
+    (p) => p.number === "XLSX/TEST1",
+  );
+  assert.equal(saved.taxes.igst, 180);
+  assert.equal(saved.rate, 18);
+  assert.equal(saved.importSource.row, 2);
+  const reread = await request("/portal");
+  assert.ok(
+    reread.activeCase.state.workspace.periods["2026-10"].purchases.some(
+      (p) => p.id === saved.id,
+    ),
+  );
+  assert.equal(
+    (
+      await action("excel/import", {
+        ...body,
+        fingerprint: inspected.preview.fingerprint,
+        reviewed: true,
+      })
+    ).code,
+    400,
+  );
+  assert.equal((await request("/workspace/excel/preview", body, "")).code, 401);
+});
+test("offline challans follow remitting-bank/UTR steps, minor heads stay separate and OTC has a period limit", async () => {
+  await reset();
+  const initial = (await request("/portal")).activeCase.state.workspace.cash;
+  assert.equal(
+    (
+      await action("challan/create", {
+        amounts: { igst: 100 },
+        mode: "NEFT / RTGS",
+      })
+    ).code,
+    400,
+  );
+  const c = await action("challan/create", {
+    deposits: { tax: { igst: 100 }, interest: { igst: 25 }, fee: { cgst: 10 } },
+    mode: "NEFT / RTGS",
+    bank: "State Bank of India",
+  });
+  assert.equal(c.code, 200, c.message);
+  assert.equal(c.challan.total, 135);
+  assert.ok(new Date(c.challan.expiresAt) > new Date(c.challan.createdAt));
+  const id = c.challan.id;
+  assert.equal((await action("challan/check-status", { id })).code, 400);
+  assert.equal(
+    (
+      await request("/workspace/challan/otp", {
+        id,
+        bank: "State Bank of India",
+        terms: true,
+      })
+    ).code,
+    400,
+  );
+  assert.equal(
+    (await action("challan/link-utr", { id, utr: "bad" })).code,
+    400,
+  );
+  const linked = await action("challan/link-utr", {
+    id,
+    utr: "BANK000000000000000001",
+  });
+  assert.equal(linked.challan.status, "Awaiting bank confirmation");
+  assert.deepEqual(linked.state.workspace.cash, initial);
+  const paid = await action("challan/check-status", { id });
+  assert.equal(paid.challan.status, "Paid");
+  assert.equal(paid.state.workspace.cash.igst, initial.igst + 100);
+  assert.equal(paid.state.workspace.cashCategories.interest.igst, 25);
+  assert.equal(paid.state.workspace.cashCategories.fee.cgst, 10);
+  assert.equal((await action("challan/check-status", { id })).code, 400);
+  assert.equal(
+    (
+      await action("challan/create", {
+        amounts: { igst: 10001 },
+        mode: "Over the Counter",
+        bank: "State Bank of India",
+        instrument: "Cash",
+      })
+    ).code,
+    400,
+  );
+  const otc = await action("challan/create", {
+    amounts: { cgst: 8000 },
+    mode: "Over the Counter",
+    bank: "State Bank of India",
+    instrument: "Cash",
+  });
+  assert.equal(otc.code, 200);
+  assert.equal(
+    (
+      await action("challan/create", {
+        amounts: { igst: 3000 },
+        mode: "Over the Counter",
+        bank: "State Bank of India",
+        instrument: "Cash",
+      })
+    ).code,
+    400,
+  );
+  assert.equal(
+    (await action("challan/check-status", { id: otc.challan.id })).challan
+      .status,
+    "Paid",
+  );
+});
+test("quarter-end section edits update the original unfiled month's record without making a copy", async () => {
+  await reset();
+  await action("filing-frequency", { frequency: "QRMP" });
+  const first = await action("invoice/save", {
+    invoice: { ...invoice, number: "QTR/EDIT" },
+  });
+  assert.equal(first.code, 200, first.message);
+  await action("period", { period: "2026-12" });
+  const quarter = (await request("/portal")).activeCase.state.workspace;
+  assert.ok(quarter.gstr1Invoices.some((i) => i.id === first.invoice.id));
+  const edited = await action("invoice/save", {
+    invoice: {
+      ...first.invoice,
+      taxable: 2000,
+      items: undefined,
+      taxes: undefined,
+      invoiceValue: undefined,
+    },
+  });
+  assert.equal(edited.code, 200, edited.message);
+  assert.equal(
+    edited.state.workspace.periods["2026-10"].invoices.find(
+      (i) => i.id === first.invoice.id,
+    ).taxable,
+    2000,
+  );
+  assert.equal(
+    edited.state.workspace.periods["2026-12"].invoices.some(
+      (i) => i.id === first.invoice.id,
+    ),
+    false,
+  );
+  assert.equal(
+    (await action("invoice/delete", { id: first.invoice.id })).code,
+    200,
+  );
+  assert.equal(
+    (await request("/portal")).activeCase.state.workspace.gstr1Invoices.some(
+      (i) => i.id === first.invoice.id,
+    ),
+    false,
+  );
+});
 const invoice = {
   section: "B2B",
   number: "TEST-001",
@@ -149,16 +368,35 @@ test("authentication rejects missing tokens and invalid credentials", async () =
 test("all registration operations require login before changing drafts or sending OTPs", async () => {
   const before = await request("/portal");
   const emailCount = delivered.length;
-  for (const endpoint of ["new", "start", "verify", "resume", "resume-verify", "save", "submit"]) {
+  for (const endpoint of [
+    "new",
+    "start",
+    "verify",
+    "resume",
+    "resume-verify",
+    "save",
+    "submit",
+  ]) {
     for (const auth of ["", "invalid-session"]) {
-      const result = await request("/workspace/registration/" + endpoint, {}, auth);
+      const result = await request(
+        "/workspace/registration/" + endpoint,
+        {},
+        auth,
+      );
       assert.equal(result.code, 401, endpoint);
     }
   }
-  assert.equal((await request("/portal/applications/open", { reference: "unknown" }, "")).code, 401);
+  assert.equal(
+    (await request("/portal/applications/open", { reference: "unknown" }, ""))
+      .code,
+    401,
+  );
   assert.equal(delivered.length, emailCount);
   const after = await request("/portal");
-  assert.deepEqual(after.activeCase.state.workspace.registration, before.activeCase.state.workspace.registration);
+  assert.deepEqual(
+    after.activeCase.state.workspace.registration,
+    before.activeCase.state.workspace.registration,
+  );
 });
 test("workspace migration retains old seed records and separates user records", async () => {
   await reset();
@@ -508,7 +746,12 @@ test("later-period filings require the previous GSTR-3B and amendments contribut
   const plan = (await request("/portal")).activeCase.state.workspace
     .paymentPlan;
   if (totalHeads(plan.shortfall)) {
-    const c = await action("challan/create", { amounts: plan.shortfall });
+    const c = await action("challan/create", {
+      deposits: {
+        tax: plan.taxShortfall || plan.shortfall,
+        ...plan.minorShortfall,
+      },
+    });
     await action("challan/pay", { id: c.challan.id });
   }
   assert.equal((await action("gstr3b/offset")).code, 200);
@@ -607,7 +850,12 @@ test("QRMP: historical periods, optional IFF, quarterly totals and post-filing l
   const plan = (await request("/portal")).activeCase.state.workspace
     .paymentPlan;
   if (totalHeads(plan.shortfall)) {
-    const c = await action("challan/create", { amounts: plan.shortfall });
+    const c = await action("challan/create", {
+      deposits: {
+        tax: plan.taxShortfall || plan.shortfall,
+        ...plan.minorShortfall,
+      },
+    });
     await action("challan/pay", { id: c.challan.id });
   }
   assert.equal((await action("gstr3b/offset")).code, 200);
@@ -800,7 +1048,7 @@ test("GSTR-3B utility upload retains state rows, reversals, exemptions and is lo
   assert.equal(
     (
       await action("gstr3b/upload", {
-        data: { tables: { 3.1: { a: { taxable: -1 } } } },
+        data: { tables: { 3.1: { a: { taxable: "not-a-number" } } } },
       })
     ).code,
     400,
@@ -810,7 +1058,12 @@ test("GSTR-3B utility upload retains state rows, reversals, exemptions and is lo
   const plan = (await request("/portal")).activeCase.state.workspace
     .paymentPlan;
   if (totalHeads(plan.shortfall)) {
-    const c = await action("challan/create", { amounts: plan.shortfall });
+    const c = await action("challan/create", {
+      deposits: {
+        tax: plan.taxShortfall || plan.shortfall,
+        ...plan.minorShortfall,
+      },
+    });
     await action("challan/pay", { id: c.challan.id });
   }
   assert.equal((await action("gstr3b/offset")).code, 200);
@@ -1135,12 +1388,7 @@ test("company registration retains directors, HSN records and attachments in a s
   );
   await action("registration/resume", { trn, email: partA.email });
   await action("registration/resume-verify", { otp: delivered.at(-1).code });
-  const attachment = {
-    name: "resolution.pdf",
-    data:
-      "data:application/pdf;base64," +
-      Buffer.from("%PDF-1.4\nTraining document\n%%EOF").toString("base64"),
-  };
+  const attachment = { kind: "authorization", simulated: true };
   const directors = [
     {
       name: "Akash",
@@ -1182,6 +1430,8 @@ test("company registration retains directors, HSN records and attachments in a s
       address: "Shiv Complex",
       city: "Bengaluru",
       pincode: "560001",
+      latitude: "12.976600",
+      longitude: "77.599300",
       possession: "Own",
       proofType: "Electricity Bill",
       attachment,
@@ -1202,7 +1452,23 @@ test("company registration retains directors, HSN records and attachments in a s
     .registration;
   assert.equal(saved.tabs.promoters.records.length, 2);
   assert.equal(saved.tabs.goods.records.length, 5);
-  assert.equal(saved.tabs.signatory.attachment.data, attachment.data);
+  assert.equal(saved.tabs.principal.latitude, "12.976600");
+  assert.equal(saved.tabs.principal.longitude, "77.599300");
+  assert.equal(
+    (
+      await action("registration/save", {
+        tab: "principal",
+        values: { ...values.principal, latitude: 100 },
+      })
+    ).code,
+    400,
+  );
+  assert.equal(saved.tabs.signatory.attachment.simulated, true);
+  assert.equal(
+    saved.tabs.signatory.attachment.name,
+    "Letter_of_Authorization.pdf",
+  );
+  assert.equal(saved.tabs.signatory.attachment.data, undefined);
   assert.equal(
     (
       await action("registration/save", {
@@ -1626,5 +1892,151 @@ test("Aadhaar person dropdown uses saved signatories and removed people require 
   );
   assert.ok(
     !saved.state.workspace.registration.savedTabs.includes("verification"),
+  );
+});
+
+test("e-way bill import creates real return records, preserves item taxes, rejects duplicate imports and respects filing locks", async () => {
+  await reset();
+  await action("period", { period: "2022-10" });
+  await documentLogin("eway");
+  const gstin = (await request("/portal")).activeCase.state.taxpayer.gstin;
+  const form = {
+    ...documentForm(gstin, "IMP/001"),
+    supplyType: "Outward",
+    subType: "Supply",
+    documentType: "Tax Invoice",
+  };
+  const generated = await action("documents/create", { kind: "eway", form });
+  assert.equal(generated.code, 200, generated.message);
+  const imported = await action("gstr1/import-ewb", {
+    section: "B2B",
+    ids: [generated.document.id],
+  });
+  assert.equal(imported.code, 200, imported.message);
+  assert.equal(imported.accepted, 1);
+  const row = imported.state.workspace.periods["2022-10"].invoices.find(
+    (row) => row.number === "IMP/001",
+  );
+  assert.equal(row.source, "E-way bill");
+  assert.equal(row.items.length, 2);
+  assert.equal(row.taxes.igst, 39600);
+  const again = await action("gstr1/import-ewb", {
+    section: "B2B",
+    ids: [generated.document.id],
+  });
+  assert.equal(again.accepted, 0);
+  assert.match(again.errors[0].error, /already been imported/);
+  const revised = await action("invoice/save", {
+    invoice: { ...row, recipient: "Updated Buyer" },
+  });
+  assert.equal(revised.code, 200);
+  assert.equal(revised.invoice.ewayBillNumber, generated.document.number);
+  assert.equal(
+    (
+      await action("gstr1/import-ewb", {
+        section: "B2B",
+        ids: [generated.document.id],
+      })
+    ).accepted,
+    0,
+  );
+  await action("gstr1/summary");
+  assert.equal((await action("gstr1/file", sign)).code, 200);
+  assert.equal(
+    (
+      await action("gstr1/import-ewb", {
+        section: "B2B",
+        ids: [generated.document.id],
+      })
+    ).code,
+    400,
+  );
+});
+
+test("B2C e-way bill imports consolidate multiple documents by POS and rate without duplicate tax", async () => {
+  await reset();
+  await action("period", { period: "2022-10" });
+  await documentLogin("eway");
+  const gstin = (await request("/portal")).activeCase.state.taxpayer.gstin;
+  const base = documentForm(gstin, "IMP/002");
+  const form = {
+    ...base,
+    supplyType: "Outward",
+    subType: "Supply",
+    documentType: "Tax Invoice",
+    buyer: { ...base.buyer, gstin: "URP" },
+    items: [
+      { ...base.items[0], quantity: 1, unitPrice: 1000, rate: 5 },
+      { ...base.items[1], quantity: 1, unitPrice: 2000, rate: 18 },
+    ],
+  };
+  const one = await action("documents/create", { kind: "eway", form });
+  const two = await action("documents/create", {
+    kind: "eway",
+    form: { ...form, number: "IMP/003" },
+  });
+  assert.equal(one.code, 200, one.message);
+  assert.equal(two.code, 200, two.message);
+  const imported = await action("gstr1/import-ewb", {
+    section: "B2CS",
+    ids: [one.document.id, two.document.id],
+  });
+  assert.equal(imported.code, 200, imported.message);
+  assert.deepEqual(imported.errors, []);
+  const rows = imported.state.workspace.periods["2022-10"].invoices.filter(
+    (row) => row.section === "B2CS",
+  );
+  assert.equal(rows.length, 2);
+  assert.equal(
+    rows.reduce((n, row) => n + row.taxable, 0),
+    6000,
+  );
+  assert.equal(
+    rows.reduce((n, row) => n + row.taxes.igst, 0),
+    820,
+  );
+  assert.equal(rows[0].ewayBillNumbers.length, 2);
+  const again = await action("gstr1/import-ewb", {
+    section: "B2CS",
+    ids: [one.document.id],
+  });
+  assert.equal(again.accepted, 0);
+  assert.match(again.errors[0].error, /already been imported/);
+});
+
+test("invoice numbers are unique across return months and invoice tables in the same FY, while aggregate references can recur monthly", async () => {
+  await reset();
+  await action("period", { period: "2022-10" });
+  const original = { ...invoice, number: "FY/001", date: "2022-10-15" };
+  assert.equal((await action("invoice/save", { invoice: original })).code, 200);
+  const aggregate = {
+    section: "B2CS",
+    number: "B2CS-29-18",
+    place: "Karnataka",
+    taxable: 100,
+    rate: 18,
+  };
+  assert.equal(
+    (await action("invoice/save", { invoice: aggregate })).code,
+    200,
+  );
+  await action("period", { period: "2022-11" });
+  const duplicate = await action("invoice/save", {
+    invoice: { ...original, date: "2022-11-15" },
+  });
+  assert.equal(duplicate.code, 400);
+  assert.match(duplicate.message, /financial year/);
+  assert.equal(
+    (await action("invoice/save", { invoice: aggregate })).code,
+    200,
+  );
+  await action("period", { period: "2023-10" });
+  assert.equal(
+    (
+      await action("invoice/save", {
+        invoice: { ...original, date: "2023-10-15" },
+      })
+    ).code,
+    200,
   );
 });

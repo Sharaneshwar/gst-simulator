@@ -10,7 +10,10 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
+    "@maplibre/maplibre-gl-leaflet": "^0.1.4",
     "@vercel/functions": "^3.10.5",
+    "leaflet": "^1.9.4",
+    "maplibre-gl": "^6.16.0",
     "qrcode": "^1.5.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"

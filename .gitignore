@@ -6,6 +6,7 @@ frontend/.env.local
 .vite/
 backend/data/*
 !backend/data/hsn-sac.json
+!backend/data/postal-directory.json
 backend/.env
 backend/.env.*
 !backend/.env.example

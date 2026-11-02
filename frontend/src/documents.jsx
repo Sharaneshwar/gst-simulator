@@ -1096,6 +1096,34 @@ export function Documents({ kind }) {
                       ))}
                   <Panel title="Item Details">
                     <Select
+                      label="Add Product from My Master"
+                      options={(w.masters?.products || []).map((product) => [
+                        product.id,
+                        product.name,
+                      ])}
+                      value=""
+                      onChange={(e) => {
+                        const product = w.masters.products.find(
+                          (product) => product.id === e.target.value,
+                        );
+                        if (!product) return;
+                        const item = {
+                          ...ITEM,
+                          name: product.name,
+                          description: product.description,
+                          hsn: product.hsn,
+                          uqc: product.uqc,
+                          rate: product.rate,
+                        };
+                        set(
+                          "items",
+                          form.items.length === 1 && !form.items[0].name
+                            ? [item]
+                            : [...form.items, item],
+                        );
+                      }}
+                    />
+                    <Select
                       label="Place of Supply"
                       required
                       value={form.place}
@@ -1226,6 +1254,7 @@ export function Documents({ kind }) {
                               <td>
                                 <RateSelect
                                   compact
+                                  portal
                                   aria-label="GST Rate"
                                   value={i.rate}
                                   date={form.date}

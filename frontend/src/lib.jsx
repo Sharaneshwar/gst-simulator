@@ -100,7 +100,8 @@ export const SECTIONS = [
   ["TXP", "11B(1), 11B(2)", "Adjustment of Advances"],
   ["HSN", "12", "HSN-wise summary of outward supplies"],
   ["DOCS", "13", "Documents Issued"],
-  ["ECO", "14, 15", "Supplies through E-Commerce Operators"],
+  ["ECO", "14", "Supplies made through ECO"],
+  ["ECO95", "15", "Supplies u/s 9(5)"],
   ["B2BA", "9A", "Amended B2B Invoices"],
   ["B2CLA", "9A", "Amended B2C (Large) Invoices"],
   ["EXPA", "9A", "Amended Exports Invoices"],
@@ -109,7 +110,8 @@ export const SECTIONS = [
   ["ATA", "11A", "Amended Tax Liability (Advances)"],
   ["TXPA", "11B", "Amended Adjustment of Advances"],
   ["B2CSA", "10", "Amended B2C (Others)"],
-  ["ECOA", "14A, 15A", "Amended E-Commerce Supplies"],
+  ["ECOA", "14A", "Amended Supplies made through ECO"],
+  ["ECO95A", "15A", "Amended Supplies u/s 9(5)"],
 ];
 export const REG_TABS = [
   ["business", "Business Details"],

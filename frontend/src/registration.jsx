@@ -1,4 +1,8 @@
-import { useState } from "react";
+import { JurisdictionFields } from "./jurisdiction-fields";
+import { useEffect, useRef, useState } from "react";
+import { PracticeUploads } from "./practice-upload";
+import { AddressMap } from "./address-map";
+import { GST_STATE_OPTIONS } from "./gst-states.mjs";
 import { RegistrationGoods } from "./hsn-search";
 import {
   Btn,
@@ -30,6 +34,13 @@ const FIELDS = {
         "Limited Liability Partnership",
         "Trust",
         "Society",
+        "Hindu Undivided Family",
+        "Government Department",
+        "Local Authority",
+        "Statutory Body",
+        "Foreign Company",
+        "Unlimited Company",
+        "Others",
       ],
       true,
     ],
@@ -42,6 +53,11 @@ const FIELDS = {
         "Voluntary Basis",
         "Transfer of business",
         "Change in constitution of business",
+        "SEZ Unit",
+        "SEZ Developer",
+        "Liability to pay tax under reverse charge",
+        "E-Commerce Operator",
+        "Others",
       ],
       true,
     ],
@@ -158,6 +174,8 @@ const PERSON_FIELDS = [
   ["flat", "Building / Flat Number", "text"],
   ["floor", "Floor Number", "text"],
   ["landmark", "Nearby Landmark", "text"],
+  ["latitude", "Latitude", "text"],
+  ["longitude", "Longitude", "text"],
 ];
 FIELDS.business.push(
   ["additionalTradeName", "Additional Trade Name", "text"],
@@ -211,6 +229,11 @@ FIELDS.principal.push(
   ],
 );
 FIELDS.additional.push(
+  ["district", "District", "text"],
+  ["street", "Road / Street", "text"],
+  ["locality", "Locality / Sub Locality", "text"],
+  ["latitude", "Latitude", "text"],
+  ["longitude", "Longitude", "text"],
   ["city", "City / Town / Village", "text"],
   ["state", "State / UT", "text"],
   [
@@ -220,21 +243,9 @@ FIELDS.additional.push(
   ],
 );
 const REPEATED = ["promoters", "signatory", "additional", "goods"];
-const readAttachment = (file) =>
-  new Promise((resolve, reject) => {
-    if (file.size > 1048576) {
-      reject(Error("Select a PDF or image smaller than 1 MB."));
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () =>
-      resolve({ name: file.name, size: file.size, data: reader.result });
-    reader.onerror = () => reject(Error("Unable to read this file."));
-    reader.readAsDataURL(file);
-  });
 
 export function Registration() {
-  const { user, w, mutate, go, setNotice, setError } = usePortal();
+  const { user, w, mutate, api, go, setNotice, setError } = usePortal();
   const r = w?.registration;
   const [kind, setKind] = useState(r?.trn ? "trn" : "new");
   const draftKey = `gstRegistrationDraft:${user?.id || "guest"}:${r?.id || r?.trn || "new"}`;
@@ -251,6 +262,37 @@ export function Registration() {
       return { email: user?.email || "" };
     }
   });
+  const [districts, setDistricts] = useState([]),
+    [districtLoading, setDistrictLoading] = useState(false);
+  const apiRef = useRef(api);
+  apiRef.current = api;
+  useEffect(() => {
+    if (!a.state || !apiRef.current) {
+      setDistricts([]);
+      return;
+    }
+    let cancelled = false;
+    setDistrictLoading(true);
+    apiRef
+      .current(
+        "/workspace/registration/districts",
+        { state: a.state },
+        undefined,
+        { background: true },
+      )
+      .then((result) => {
+        if (!cancelled) setDistricts(result.districts);
+      })
+      .catch(() => {
+        if (!cancelled) setDistricts([]);
+      })
+      .finally(() => {
+        if (!cancelled) setDistrictLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [a.state]);
   const [mobileOtp, setMobileOtp] = useState("");
   const [emailOtp, setEmailOtp] = useState("");
   const [trn, setTrn] = useState(r?.trn || "");
@@ -265,7 +307,11 @@ export function Registration() {
   const [signing, setSigning] = useState(false);
   const [captcha, setCaptcha] = useState("");
   const updateA = (key, value) => {
-    const next = { ...a, [key]: value };
+    const next = {
+      ...a,
+      [key]: value,
+      ...(key === "state" ? { district: "" } : {}),
+    };
     setA(next);
     sessionStorage.setItem(draftKey, JSON.stringify(next));
   };
@@ -346,6 +392,19 @@ export function Registration() {
         );
       return next;
     });
+  }
+  function setFields(fields) {
+    setValues((old) => ({
+      ...old,
+      ...fields,
+      ...(old.records
+        ? {
+            records: old.records.map((record, i) =>
+              i === recordIndex ? { ...record, ...fields } : record,
+            ),
+          }
+        : {}),
+    }));
   }
   function addRecord() {
     const records = values.records || [{ ...values }];
@@ -508,122 +567,193 @@ export function Registration() {
               </Btn>
             </div>
           )}
+          {["principal", "additional", "promoters", "signatory"].includes(
+            tab,
+          ) &&
+            (tab !== "additional" || values.hasAdditional === "Yes") && (
+              <AddressMap
+                key={`${tab}:${recordIndex}`}
+                values={values}
+                state={r.partA.state}
+                business={["principal", "additional"].includes(tab)}
+                onConfirm={(fields) =>
+                  setValues((old) => ({
+                    ...old,
+                    ...fields,
+                    ...(old.records
+                      ? {
+                          records: old.records.map((record, i) =>
+                            i === recordIndex
+                              ? { ...record, ...fields }
+                              : record,
+                          ),
+                        }
+                      : {}),
+                  }))
+                }
+              />
+            )}
           {tab === "goods" ? (
             <RegistrationGoods values={values} onChange={setValues} />
           ) : (
             <div className="form-grid">
-              {FIELDS[tab].map(([key, label, type, required]) =>
-                (tab === "aadhaar" && key === "person") ||
-                (tab === "verification" && key === "signatory") ? (
-                  tab === "aadhaar" && values.opted !== "Yes" ? null : (
+              {FIELDS[tab]
+                .filter(
+                  ([key]) =>
+                    !(
+                      tab === "business" &&
+                      key === "cin" &&
+                      ![
+                        "Private Limited Company",
+                        "Public Limited Company",
+                        "Foreign Company",
+                        "Unlimited Company",
+                      ].includes(values.constitution)
+                    ) &&
+                    !(
+                      ["principal", "additional"].includes(tab) &&
+                      ["jurisdiction", "ward", "centreJurisdiction"].includes(
+                        key,
+                      )
+                    ),
+                )
+                .map(([key, label, type, required]) =>
+                  (tab === "aadhaar" && key === "person") ||
+                  (tab === "verification" && key === "signatory") ? (
+                    tab === "aadhaar" && values.opted !== "Yes" ? null : (
+                      <Select
+                        key={key}
+                        label={label}
+                        required
+                        disabled={!w.registrationSignatories?.length}
+                        placeholder={
+                          w.registrationSignatories?.length
+                            ? "Select authorized signatory"
+                            : "Add an authorized signatory first"
+                        }
+                        help={
+                          !w.registrationSignatories?.length
+                            ? "Save the Authorized Signatory section to populate this list."
+                            : ""
+                        }
+                        options={w.registrationSignatories || []}
+                        value={(() => {
+                          const current =
+                            tab === "verification"
+                              ? values.signatoryId || values[key]
+                              : values[key];
+                          const people = w.registrationSignatories || [];
+                          const exact = people.find(
+                            (person) => person.value === current,
+                          );
+                          if (exact) return exact.value;
+                          const matches = people.filter((person) =>
+                            person.aliases?.includes(current),
+                          );
+                          return matches.length === 1 ? matches[0].value : "";
+                        })()}
+                        onChange={(e) => {
+                          setField(key, e.target.value);
+                          if (tab === "verification")
+                            setField("signatoryId", e.target.value);
+                        }}
+                      />
+                    )
+                  ) : key === "state" &&
+                    ["promoters", "signatory"].includes(tab) ? (
                     <Select
                       key={key}
                       label={label}
-                      required
-                      disabled={!w.registrationSignatories?.length}
-                      placeholder={
-                        w.registrationSignatories?.length
-                          ? "Select authorized signatory"
-                          : "Add an authorized signatory first"
-                      }
-                      help={
-                        !w.registrationSignatories?.length
-                          ? "Save the Authorized Signatory section to populate this list."
-                          : ""
-                      }
-                      options={w.registrationSignatories || []}
-                      value={(() => {
-                        const current =
-                          tab === "verification"
-                            ? values.signatoryId || values[key]
-                            : values[key];
-                        const people = w.registrationSignatories || [];
-                        const exact = people.find(
-                          (person) => person.value === current,
-                        );
-                        if (exact) return exact.value;
-                        const matches = people.filter((person) =>
-                          person.aliases?.includes(current),
-                        );
-                        return matches.length === 1 ? matches[0].value : "";
-                      })()}
-                      onChange={(e) => {
-                        setField(key, e.target.value);
-                        if (tab === "verification")
-                          setField("signatoryId", e.target.value);
-                      }}
+                      options={GST_STATE_OPTIONS}
+                      value={values[key] || ""}
+                      onChange={(e) => setField(key, e.target.value)}
                     />
-                  )
-                ) : Array.isArray(type) ? (
-                  <Select
-                    key={key}
-                    label={label}
-                    required={required}
-                    options={type}
-                    value={values[key] ?? defaults(tab)[key] ?? ""}
-                    onChange={(e) => setField(key, e.target.value)}
-                  />
-                ) : (
-                  <Input
-                    key={key}
-                    label={label}
-                    required={required}
-                    type={type}
-                    readOnly={tab === "principal" && key === "state"}
-                    value={values[key] ?? defaults(tab)[key] ?? ""}
-                    onChange={(e) => setField(key, e.target.value)}
-                  />
-                ),
-              )}
+                  ) : Array.isArray(type) ? (
+                    <Select
+                      key={key}
+                      label={label}
+                      required={required}
+                      options={type}
+                      value={values[key] ?? defaults(tab)[key] ?? ""}
+                      onChange={(e) => setField(key, e.target.value)}
+                    />
+                  ) : (
+                    <Input
+                      key={key}
+                      label={label}
+                      required={required}
+                      type={type}
+                      readOnly={
+                        ["principal", "additional"].includes(tab) &&
+                        key === "state"
+                      }
+                      value={values[key] ?? defaults(tab)[key] ?? ""}
+                      onChange={(e) => setField(key, e.target.value)}
+                    />
+                  ),
+                )}
             </div>
           )}
-          {[
-            "business",
-            "promoters",
-            "signatory",
-            "principal",
-            "additional",
-          ].includes(tab) && (
-            <div className="document-attachment">
-              <Input
-                label={
-                  tab === "principal"
-                    ? "Proof of Principal Place of Business"
-                    : "Supporting Document / Photograph"
-                }
-                type="file"
-                accept=".pdf,.jpg,.jpeg,.png"
-                onChange={async (e) => {
-                  const file = e.target.files[0];
-                  if (!file) return;
-                  try {
-                    setField("attachment", await readAttachment(file));
-                  } catch (error) {
-                    setError(error.message);
-                  }
-                }}
+          {["principal", "additional"].includes(tab) &&
+            (tab !== "additional" || values.hasAdditional === "Yes") && (
+              <JurisdictionFields
+                key={`${tab}:${recordIndex}`}
+                values={values}
+                state={r.partA.state}
+                onChange={setFields}
               />
-              {values.attachment && (
-                <p>
-                  Attached: <b>{values.attachment.name}</b> (
-                  {Math.ceil(values.attachment.size / 1024)} KB)
-                  {values.attachment.data && (
-                    <Btn
-                      tone="secondary"
-                      onClick={() => {
-                        const link = document.createElement("a");
-                        link.href = values.attachment.data;
-                        link.download = values.attachment.name;
-                        link.click();
-                      }}
-                    >
-                      DOWNLOAD
-                    </Btn>
-                  )}
-                </p>
+            )}
+          {tab === "business" && (
+            <div className="form-grid">
+              {["SEZ Unit", "SEZ Developer"].includes(values.reason) && (
+                <>
+                  <Input
+                    label="SEZ Letter of Approval / Permission Number"
+                    required
+                    value={values.sezLoaNumber || ""}
+                    onChange={(e) => setField("sezLoaNumber", e.target.value)}
+                  />
+                  <Input
+                    label="SEZ Approval Date"
+                    type="date"
+                    required
+                    value={values.sezLoaDate || ""}
+                    onChange={(e) => setField("sezLoaDate", e.target.value)}
+                  />
+                </>
+              )}
+              {values.casual === "Yes" && (
+                <>
+                  <Input
+                    label="Period of validity — From"
+                    required
+                    type="date"
+                    value={values.validFrom || ""}
+                    onChange={(e) => setField("validFrom", e.target.value)}
+                  />
+                  <Input
+                    label="Period of validity — To"
+                    required
+                    type="date"
+                    value={values.validTo || ""}
+                    onChange={(e) => setField("validTo", e.target.value)}
+                  />
+                  <Input
+                    label="Estimated tax liability (₹)"
+                    type="number"
+                    min="0"
+                    value={values.estimatedTax || ""}
+                    onChange={(e) => setField("estimatedTax", e.target.value)}
+                  />
+                </>
               )}
             </div>
           )}
+          <PracticeUploads
+            tab={tab}
+            values={values}
+            onChange={(files) => setField("attachments", files)}
+          />
           {tab === "aadhaar" && (
             <p className="info">
               Authentication preference will be recorded with this application.
@@ -932,9 +1062,15 @@ export function Registration() {
                       (s) => !["Outside India", "Other State"].includes(s),
                     )}
                   />
-                  <Input
+                  <Select
                     label="District"
                     required
+                    disabled={!a.state || districtLoading}
+                    options={
+                      a.district && !districts.includes(a.district)
+                        ? [a.district, ...districts]
+                        : districts
+                    }
                     value={a.district || ""}
                     onChange={(e) => updateA("district", e.target.value)}
                   />

@@ -1,3 +1,8 @@
+import { InvoiceRateGrid } from "./invoice-rate-grid";
+import { resetTaxOverrides } from "./return-entry.mjs";
+import { stateFromGstin } from "./gst-states.mjs";
+import { ProcessingRecords } from "./advanced-pages";
+import { ExcelImport } from "./excel-import";
 import { Dropdown } from "./dropdown";
 import { RateSelect } from "./rate-guide";
 import { useState } from "react";
@@ -104,7 +109,7 @@ export function OfflineReturn({ type = "GSTR-1" }) {
             onClick={async () => {
               if (file.size > 6000000)
                 throw Error("Select a file smaller than 6 MB.");
-              await mutate(three ? "gstr3b/upload" : "upload", {
+              await mutate(three ? "gstr3b/upload" : "processing/start", {
                 name: file.name,
                 data: await file.text(),
               });
@@ -115,6 +120,8 @@ export function OfflineReturn({ type = "GSTR-1" }) {
           </Btn>
         </div>
       </Panel>
+      {!three && <ProcessingRecords />}
+      <ExcelImport target="sales" />
       <Panel title="Upload History">
         <Table
           columns={[
@@ -167,9 +174,9 @@ export function SupplierStatement({ type }) {
     [selected, setSelected] = useState(null);
   const is2b = type === "gstr2b",
     title = is2b ? "GSTR-2B" : "GSTR-2A";
-  const documents = p.purchases.filter(
-    (i) => !is2b || i.includedIn2b !== false,
-  );
+  const documents = (
+    is2b ? w.gstr2bRecords || p.purchases : p.purchases
+  ).filter((i) => !is2b || i.includedIn2b !== false);
   const rows = documents.filter(
     (i) => section === "All" || (i.documentType || "Invoice") === section,
   );
@@ -207,6 +214,22 @@ export function SupplierStatement({ type }) {
         {title} — {is2b ? "Auto-drafted ITC Statement" : "Auto Drafted Details"}
       </h1>
       <TaxpayerBar />
+      <div className="actions">
+        <Btn tone="secondary" onClick={() => go("ims")}>
+          OPEN IMS DASHBOARD
+        </Btn>
+        {is2b && (
+          <Btn tone="secondary" onClick={() => go("ims")}>
+            RECOMPUTE GSTR-2B
+          </Btn>
+        )}
+      </div>
+      {is2b && w.gstr2bStale && (
+        <p className="info" role="status">
+          The statement predates the latest IMS changes. Recompute GSTR-2B
+          before using its ITC.
+        </p>
+      )}
       {is2b && (
         <Panel title="ITC Summary">
           <Table columns={["Details", ...HEADS.map((h) => h.toUpperCase())]}>
@@ -394,7 +417,17 @@ export function PurchaseData() {
   });
   const [form, setForm] = useState(empty),
     [file, setFile] = useState(null);
-  const set = (k, v) => setForm((x) => ({ ...x, [k]: v }));
+  const set = (k, v) =>
+    setForm((x) => {
+      const next = { ...x, [k]: v };
+      return ["taxable", "rate", "place", "gstin"].includes(k)
+        ? {
+            ...resetTaxOverrides(next),
+            taxes: undefined,
+            invoiceValue: undefined,
+          }
+        : next;
+    });
   return (
     <div className="container">
       <Crumbs items={[["Downloads", "downloads"], "Supplier Return Data"]} />
@@ -445,6 +478,7 @@ export function PurchaseData() {
           </Btn>
         </div>
       </Panel>
+      <ExcelImport target="purchases" />
       <Panel
         title={form.id ? "Edit Supplier Document" : "Add Supplier Document"}
       >
@@ -457,7 +491,8 @@ export function PurchaseData() {
             ["taxable", "Taxable Value", "number"],
             ["rate", "GST Rate (%)", "number"],
           ].map(([k, l, t]) =>
-            k === "rate" ? (
+            form.items?.length && ["rate", "taxable"].includes(k) ? null : k ===
+              "rate" ? (
               <RateSelect
                 key={k}
                 label={l}
@@ -495,6 +530,12 @@ export function PurchaseData() {
             value={form.match}
             onChange={(e) => set("match", e.target.value)}
           />
+          <Select
+            label="Supplier Filing Status"
+            value={form.supplierFiled === false ? "Saved" : "Filed"}
+            options={["Filed", "Saved"]}
+            onChange={(e) => set("supplierFiled", e.target.value === "Filed")}
+          />
           <label className="check-line">
             <input
               type="checkbox"
@@ -504,10 +545,19 @@ export function PurchaseData() {
             Include in this month's GSTR-2B
           </label>
         </div>
+        {form.items?.length > 0 && (
+          <InvoiceRateGrid
+            invoice={{ ...form, section: "B2B" }}
+            homeState={
+              stateFromGstin(form.gstin) || active.state.taxpayer.state
+            }
+            onChange={(next) => setForm({ ...next, invoiceValue: undefined })}
+          />
+        )}
         <div className="actions">
           <Btn
             onClick={async () => {
-              const { taxes, ...purchase } = form;
+              const purchase = form;
               await mutate("purchases/save", { purchase });
               setForm(empty());
             }}
@@ -576,7 +626,7 @@ export function Interstate3b({ onClose }) {
   const change = (i, k, v) =>
     setRows((old) => old.map((r, n) => (n === i ? { ...r, [k]: v } : r)));
   return (
-    <Modal title="3.2 — Inter-State Supplies" wide onClose={onClose}>
+    <Panel title="3.2 — Inter-State Supplies">
       <div className="table-scroll">
         <table className="editable-table">
           <thead>
@@ -676,25 +726,19 @@ export function Interstate3b({ onClose }) {
           BACK
         </Btn>
       </div>
-    </Modal>
+    </Panel>
   );
 }
 
 export function InvoiceExtraFields({ section, editing, setEditing }) {
   const { w, p } = usePortal();
   const [lookup, setLookup] = useState(""),
-    [lookupYear, setLookupYear] = useState("2022");
+    [lookupYear, setLookupYear] = useState(
+      String(
+        Number(w.period.slice(0, 4)) - (Number(w.period.slice(5)) < 4 ? 1 : 0),
+      ),
+    );
   const set = (k, v) => setEditing((x) => ({ ...x, [k]: v }));
-  const items = editing.items || [];
-  const setItem = (i, k, v) =>
-    setEditing((old) => {
-      const updated = old.items.map((r, n) => (n === i ? { ...r, [k]: v } : r));
-      return {
-        ...old,
-        items: updated,
-        taxable: updated.reduce((n, r) => n + Number(r.taxable), 0),
-      };
-    });
   return (
     <>
       {section.endsWith("A") && (
@@ -821,117 +865,6 @@ export function InvoiceExtraFields({ section, editing, setEditing }) {
           />
         )}
       </div>
-      {![
-        "NIL",
-        "DOCS",
-        "HSN",
-        "B2CS",
-        "B2CSA",
-        "AT",
-        "ATA",
-        "TXP",
-        "TXPA",
-        "ECO",
-        "ECOA",
-      ].includes(section) && (
-        <div className="rate-editor">
-          <h3>Tax Rate Details</h3>
-          {items.length ? (
-            <>
-              <div className="table-scroll">
-                <table className="editable-table">
-                  <thead>
-                    <tr>
-                      <th>Rate (%)</th>
-                      <th>Taxable Value (₹)</th>
-                      <th>Cess (₹)</th>
-                      <th>Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {items.map((r, i) => (
-                      <tr key={i}>
-                        <td>
-                          <RateSelect
-                            compact
-                            aria-label="Tax rate"
-                            value={r.rate}
-                            date={editing.date}
-                            onChange={(e) => setItem(i, "rate", e.target.value)}
-                          />
-                        </td>
-                        <td>
-                          <input
-                            aria-label="Taxable amount"
-                            type="number"
-                            min="0"
-                            value={r.taxable}
-                            onChange={(e) =>
-                              setItem(i, "taxable", e.target.value)
-                            }
-                          />
-                        </td>
-                        <td>
-                          <input
-                            aria-label="Cess"
-                            type="number"
-                            min="0"
-                            value={r.cess || 0}
-                            onChange={(e) => setItem(i, "cess", e.target.value)}
-                          />
-                        </td>
-                        <td>
-                          <button
-                            className="link"
-                            onClick={() => {
-                              const next = items.filter((_, n) => n !== i);
-                              setEditing((old) => ({
-                                ...old,
-                                items: next,
-                                taxable: next.length
-                                  ? next.reduce(
-                                      (n, r) => n + Number(r.taxable),
-                                      0,
-                                    )
-                                  : old.taxable,
-                              }));
-                            }}
-                          >
-                            Remove
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <Btn
-                tone="secondary"
-                onClick={() =>
-                  set("items", [...items, { rate: 18, taxable: 0, cess: 0 }])
-                }
-              >
-                ADD TAX RATE
-              </Btn>
-            </>
-          ) : (
-            <Btn
-              tone="secondary"
-              onClick={() =>
-                set("items", [
-                  {
-                    rate: editing.rate || 18,
-                    taxable: editing.taxable || 0,
-                    cess: editing.cess || 0,
-                  },
-                ])
-              }
-            >
-              ENTER MULTIPLE TAX RATES
-            </Btn>
-          )}
-        </div>
-      )}
     </>
   );
 }

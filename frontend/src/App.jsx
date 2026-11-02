@@ -1,3 +1,10 @@
+import {
+  Ecommerce,
+  IMS,
+  CashTransfer,
+  Masters,
+  NegativeLiability,
+} from "./advanced-pages";
 import { networkHeaders } from "./network-client";
 import {
   OfflineReturn,
@@ -8,6 +15,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import {
   PortalContext,
+  Btn,
   Panel,
   PageSkeleton,
   RequestProgress,
@@ -61,6 +69,9 @@ function Shell({ children, ctx }) {
     ? [
         ["Registration", "registration"],
         ["Returns", "returns"],
+        ["Invoice Management System (IMS)", "ims"],
+        ["My Masters", "masters"],
+        ["File GST PMT-09", "pmt09"],
         ["Payments", "challans"],
         ["Ledgers", "ledgers"],
         ["User Services", "profile"],
@@ -518,19 +529,25 @@ export default function App() {
     setPortal(null);
     window.location.hash = "/home";
   }
-  async function mutate(path, body = {}) {
-    setError("");
-    const result = await api("/workspace/" + path, {
-      period: w.period,
-      ...body,
-    });
+  async function mutate(path, body = {}, options = {}) {
+    if (!options.quiet) setError("");
+    const result = await api(
+      "/workspace/" + path,
+      {
+        period: w.period,
+        ...body,
+      },
+      undefined,
+      { background: !!options.background },
+    );
     if (result.state)
       setPortal((old) => ({
         ...old,
         activeCase: { ...old.activeCase, state: result.state },
       }));
     if (path.startsWith("registration/")) await load();
-    setNotice(result.message || "Details saved successfully.");
+    if (!options.quiet)
+      setNotice(result.message || "Details saved successfully.");
     return result;
   }
   async function selectCase(slug) {
@@ -600,24 +617,38 @@ export default function App() {
     content = user.role === "instructor" ? <Cases /> : <MyProfile />;
   else if (parts[0] === "access") content = <UserAccess />;
   else if (parts[0] === "returns") content = <ReturnsDashboard />;
+  else if (parts[0] === "ims") content = <IMS key={w.period} />;
+  else if (parts[0] === "negative-liability") content = <NegativeLiability />;
+  else if (parts[0] === "pmt09") content = <CashTransfer key={active.slug} />;
+  else if (parts[0] === "masters") content = <Masters />;
   else if (parts[0] === "gstr1")
-    content =
-      parts[1] === "NIL" ? (
-        <NilSupplies key={w.period} />
-      ) : parts[1] ? (
-        <Gstr1Section key={parts[1] + w.period} section={parts[1]} />
-      ) : (
-        <Gstr1 />
-      );
+    content = parts[1]?.startsWith("ECO") ? (
+      <Ecommerce key={parts[1] + w.period} section={parts[1]} />
+    ) : parts[1] === "summary" ? (
+      <Gstr1 summaryView />
+    ) : parts[1] === "NIL" ? (
+      <NilSupplies key={w.period} />
+    ) : parts[1] ? (
+      <Gstr1Section key={parts[1] + w.period} section={parts[1]} />
+    ) : (
+      <Gstr1 />
+    );
   else if (parts[0] === "offline") content = <OfflineReturn />;
   else if (parts[0] === "offline3b") content = <OfflineReturn type="GSTR-3B" />;
   else if (parts[0] === "supplier-data")
     content = <PurchaseData key={w.period} />;
   else if (parts[0] === "gstr2a" || parts[0] === "gstr2b")
     content = <SupplierStatement key={parts[0] + w.period} type={parts[0]} />;
-  else if (parts[0] === "gstr3b") content = <Gstr3b />;
+  else if (parts[0] === "gstr3b")
+    content = (
+      <Gstr3b
+        tableRoute={parts[1] === "table" ? parts[2] : null}
+        paymentRoute={parts[1] === "payment"}
+      />
+    );
   else if (parts[0] === "ledgers") content = <Ledgers />;
-  else if (parts[0] === "challans") content = <Challans />;
+  else if (parts[0] === "challans")
+    content = <Challans viewRoute={parts[1] || ""} />;
   else if (parts[0] === "filed") content = <FiledReturns />;
   else if (parts[0] === "search")
     content = <SearchTaxpayer byPan={parts[1] === "pan"} />;

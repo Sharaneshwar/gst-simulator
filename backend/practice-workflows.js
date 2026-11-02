@@ -1,6 +1,8 @@
 "use strict";
 const crypto = require("node:crypto");
 const eway = require("./eway-rules");
+const ims = require("./ims");
+const returnRules = require("./return-rules");
 const HEADS = ["igst", "cgst", "sgst", "cess"];
 const STATE_CODES = {
   "01": "Jammu and Kashmir",
@@ -112,7 +114,8 @@ function quarterInfo(period) {
   };
 }
 function returnData(w, p, type = "gstr3b") {
-  if (w.filingFrequency !== "QRMP" || !quarterInfo(w.period).isEnd) return p;
+  if (w.filingFrequency !== "QRMP" || !quarterInfo(w.period).isEnd)
+    return { ...p, purchases: ims.purchasesFor3b(w, p) };
   const q = quarterInfo(w.period);
   const all = q.periods.map((k) => w.periods[k]).filter(Boolean);
   return {
@@ -122,7 +125,8 @@ function returnData(w, p, type = "gstr3b") {
         ? []
         : x.invoices,
     ),
-    purchases: all.flatMap((x) => x.purchases),
+    purchases:
+      p.gstr2b?.records || all.flatMap((x) => ims.purchasesFor3b(w, x)),
   };
 }
 function assertWritable(w, p) {
@@ -151,12 +155,22 @@ function invoiceItems(inv) {
       rate: t.rt,
       taxable: t.txval,
       cess: t.csamt,
-      taxes: {
-        igst: t.iamt || 0,
-        cgst: t.camt || 0,
-        sgst: t.samt || 0,
-        cess: t.csamt || 0,
-      },
+      ...(Object.keys(t).some((key) =>
+        ["iamt", "camt", "samt", "csamt"].includes(key),
+      )
+        ? {
+            taxes: Object.fromEntries(
+              [
+                ["igst", "iamt"],
+                ["cgst", "camt"],
+                ["sgst", "samt"],
+                ["cess", "csamt"],
+              ]
+                .filter(([, source]) => Object.hasOwn(t, source))
+                .map(([head, source]) => [head, t[source]]),
+            ),
+          }
+        : {}),
     };
   });
 }
@@ -169,6 +183,11 @@ function parseGstr1(d, period) {
     invoiceValue: inv.val || inv.nt_val,
     place: inv.pos ? stateName(inv.pos) : undefined,
     reverseCharge: inv.rchrg === "Y",
+    supplyCategory:
+      { R: "Regular", DE: "DeemedExport", SEWP: "SEZWP", SEWOP: "SEZWOP" }[
+        inv.inv_typ
+      ] || "Regular",
+    differential: Number(inv.diff_percent) === 0.65,
     ...extra,
     ...(inv.itms?.length
       ? { items: invoiceItems(inv) }
@@ -232,6 +251,7 @@ function parseGstr1(d, period) {
         base(inv, section, {
           noteType: inv.ntty === "D" ? "Debit Note" : "Credit Note",
           recipientType: inv.typ || "B2CL",
+          urType: inv.typ || "B2CL",
           originalNumber: inv.ont_num,
           originalPeriod: date(inv.ont_dt).slice(0, 7),
         }),
@@ -388,6 +408,7 @@ function draft3b(p, homeState) {
       p.invoices.filter(
         (i) =>
           !["NIL", "DOCS", "HSN"].includes(i.section) &&
+          !i.section.startsWith("ECO") &&
           !i.section.startsWith("EXP") &&
           !i.reverseCharge,
       ),
@@ -469,6 +490,19 @@ function draft3b(p, homeState) {
   interstate.rows.states = states;
   return {
     3.1: signed({ ...rows, d: { taxable: 0, taxes: heads() } }, ["a", "b"]),
+    "3.1.1": signed(
+      {
+        a: sum(
+          p.invoices.filter((i) => ["ECO95", "ECO95A"].includes(i.section)),
+        ),
+        b: sum(
+          p.invoices.filter(
+            (i) => ["ECO", "ECOA"].includes(i.section) && i.ecoBucket === "95",
+          ),
+        ),
+      },
+      ["a"],
+    ),
     3.2: interstate,
     4: validate3b("4", {
       a5: {
@@ -492,12 +526,18 @@ function validate3b(table, inputRows) {
   if (!keys) fail("Unknown GSTR-3B table.");
   if (!inputRows || typeof inputRows !== "object" || Array.isArray(inputRows))
     fail("Invalid table details.");
+  const readAmount = ["3.1", "3.1.1", "4"].includes(String(table))
+    ? returnRules.signed
+    : amount;
+  const readHeads = ["3.1", "3.1.1", "4"].includes(String(table))
+    ? returnRules.signedHeads
+    : heads;
   const rows = Object.fromEntries(
     keys.map((k) => [
       k,
       {
-        taxable: amount(inputRows[k]?.taxable),
-        taxes: heads(inputRows[k]?.taxes),
+        taxable: readAmount(inputRows[k]?.taxable),
+        taxes: readHeads(inputRows[k]?.taxes),
       },
     ]),
   );
@@ -512,6 +552,13 @@ function validate3b(table, inputRows) {
           taxes: { igst: amount(r.taxes?.igst), cgst: 0, sgst: 0, cess: 0 },
         }))
       : [];
+  if (
+    table === "4" &&
+    ["a1", "a2"].some((key) => rows[key].taxes.cgst || rows[key].taxes.sgst)
+  )
+    fail(
+      "Import of goods and import of services allow Integrated Tax and Cess only in Table 4.",
+    );
   if (states.length > 100) fail("Too many interstate supply rows.");
   if (states.length)
     for (const key of keys)
@@ -632,6 +679,45 @@ function purchaseIsInterstate(gstin, place) {
   return stateName(gstin.slice(0, 2)) !== stateName(place);
 }
 function purchaseRow(input, period, homeState) {
+  if (Array.isArray(input.items) && input.items.length) {
+    if (input.items.length > 100)
+      fail("Add at most 100 item-rate rows per purchase document.");
+    const parts = input.items.map((line) =>
+      purchaseRow(
+        {
+          ...input,
+          items: undefined,
+          rate: line.rate,
+          taxable: line.taxable,
+          taxes: line.taxes,
+          cess: line.cess,
+          invoiceValue: undefined,
+        },
+        period,
+        homeState,
+      ),
+    );
+    const taxable = round(parts.reduce((n, line) => n + line.taxable, 0)),
+      taxes = parts.reduce((sum, line) => add(sum, line.taxes), heads());
+    return {
+      ...parts[0],
+      taxable,
+      taxes,
+      invoiceValue:
+        input.invoiceValue === undefined
+          ? round(taxable + total(taxes))
+          : amount(input.invoiceValue),
+      mixedRate: new Set(parts.map((line) => line.rate)).size > 1,
+      items: parts.map((line, index) => ({
+        rate: line.rate,
+        taxable: line.taxable,
+        taxes: line.taxes,
+        cess: line.taxes.cess,
+        hsn: input.items[index].hsn || "",
+      })),
+    };
+  }
+
   const gstin = String(input.gstin || "").toUpperCase();
   if (!/^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/.test(gstin))
     fail("Enter a valid supplier GSTIN.");
@@ -689,6 +775,8 @@ function purchaseRow(input, period, homeState) {
         : "",
     includedIn2b: input.includedIn2b !== false,
     documentType: input.documentType || "Invoice",
+    supplierFiled: input.supplierFiled !== false,
+    reverseCharge: Boolean(input.reverseCharge),
     nature: input.nature || "Taxable",
     reportedOn: input.reportedOn || dt,
   };
@@ -995,31 +1083,8 @@ function parseDocumentFile(d, kind) {
     "No supported documents found. Use the JSON template, e-way bill billLists, or e-invoice Invoices format.",
   );
 }
-function attachment(a) {
-  if (!a?.data) return a;
-  const match =
-    /^data:(application\/pdf|image\/png|image\/jpeg);base64,([A-Za-z0-9+/=]+)$/.exec(
-      a.data,
-    );
-  if (!match) fail("Upload a PDF, PNG or JPEG file.");
-  const bytes = Buffer.from(match[2], "base64");
-  if (bytes.length > 1048576) fail("Attachments must be 1 MB or smaller.");
-  const magic = bytes.subarray(0, 8).toString("hex");
-  if (
-    !(
-      (match[1] === "application/pdf" &&
-        bytes.subarray(0, 5).toString() === "%PDF-") ||
-      (match[1] === "image/png" && magic === "89504e470d0a1a0a") ||
-      (match[1] === "image/jpeg" && magic.startsWith("ffd8ff"))
-    )
-  )
-    fail("File contents do not match the selected file type.");
-  return {
-    name: String(a.name || "Document").slice(0, 120),
-    size: bytes.length,
-    data: a.data,
-  };
-}
+const { attachment } = require("./practice-documents");
+
 module.exports = {
   draft3b,
   financialYear,

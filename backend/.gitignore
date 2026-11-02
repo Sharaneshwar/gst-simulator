@@ -1,5 +1,6 @@
 data/*
 !data/hsn-sac.json
+!data/postal-directory.json
 .env
 npm-debug.log*
 .env.neon-test

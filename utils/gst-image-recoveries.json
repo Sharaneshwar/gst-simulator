@@ -1,0 +1,8 @@
+{
+  "https://tutorial.gst.gov.in/userguide/loginanddsc/assets/images/314.PNG": {
+    "url": "https://tutorial.gst.gov.in/userguide/loginanddsc/assets/images/loginanddsc_72.png",
+    "source_page": "https://tutorial.gst.gov.in/userguide/loginanddsc/Troubleshoot_DSC_Issues.htm",
+    "sha256": "c36e5beb713fa5fb902acffbd7570035409e53f638e32b0eaedf50087a57ca4d",
+    "verification": "Visually verified against the preserved mirror figure: the same PAN-based certificate error dialog is already available immediately adjacent to the broken reference in section 5 of the official page. This recovery uses the working official-host copy."
+  }
+}

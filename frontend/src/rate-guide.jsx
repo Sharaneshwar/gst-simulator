@@ -13,6 +13,7 @@ export function RateSelect({
   onChange,
   date,
   compact = false,
+  portal = false,
   ...props
 }) {
   const ctx = usePortal(),
@@ -21,8 +22,8 @@ export function RateSelect({
   const selected = rateInfo(value, selectedDate);
   const options = RATE_REFERENCE.map((row) => ({
     value: row.rate,
-    label: `${row.rate}% — ${row.title}`,
-    description: row.area,
+    label: portal ? `${row.rate}%` : `${row.rate}% — ${row.title}`,
+    description: portal ? undefined : row.area,
   }));
   return (
     <div className={`rate-select ${compact ? "compact" : ""}`}>
@@ -43,7 +44,7 @@ export function RateSelect({
           onChange={onChange}
         />
       )}
-      {!compact && selected && (
+      {!compact && !portal && selected && (
         <p className="rate-selection-help">
           {selected.area}
           <span>{selected.periodNote}</span>
@@ -60,6 +61,22 @@ export function RateSelect({
         <RateGuide date={selectedDate} onClose={() => setGuide(false)} />
       )}
     </div>
+  );
+}
+
+export function RateGuideLink({ date }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        className="link rate-guide-link"
+        onClick={() => setOpen(true)}
+      >
+        VIEW ALL RATES &amp; THEIR USES
+      </button>
+      {open && <RateGuide date={date} onClose={() => setOpen(false)} />}
+    </>
   );
 }
 

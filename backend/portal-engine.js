@@ -1,6 +1,14 @@
 "use strict";
 const hsnMaster = require("./hsn-master");
 const registrationPeople = require("./registration-people");
+const practiceDocuments = require("./practice-documents");
+const { previewExcel, publicPreview } = require("./excel-import");
+const challanRules = require("./challan-rules");
+const returnRules = require("./return-rules");
+const eco = require("./eco");
+const ims = require("./ims");
+const irp = require("./irp-sync");
+const extensions = require("./portal-extensions");
 
 const crypto = require("node:crypto");
 const flow = require("./practice-workflows");
@@ -29,6 +37,8 @@ const SECTIONS = [
   "B2CSA",
   "ECO",
   "ECOA",
+  "ECO95",
+  "ECO95A",
 ];
 const REG_TABS = [
   "business",
@@ -85,20 +95,31 @@ function checkPeriod(period) {
 function taxFor(invoice, homeState) {
   if (["NIL", "DOCS", "HSN"].includes(invoice.section)) return zeros();
   const tax = round(
-    (Number(invoice.taxable || 0) * Number(invoice.rate || 0)) / 100,
+    (Number(invoice.taxable || 0) *
+      Number(invoice.rate || 0) *
+      (invoice.differential ? 0.65 : 1)) /
+      100,
   );
   if (
-    invoice.section.startsWith("EXP") &&
-    invoice.exportType === "Without payment of tax"
+    (invoice.section.startsWith("EXP") &&
+      invoice.exportType === "Without payment of tax") ||
+    invoice.supplyCategory === "SEZWOP" ||
+    invoice.urType === "EXPWOP"
   )
     return zeros();
   const interstate =
-    invoice.place !== homeState || invoice.section.startsWith("EXP");
+    invoice.place !== homeState ||
+    invoice.section.startsWith("EXP") ||
+    invoice.intraStateIgst ||
+    invoice.supplyCategory?.startsWith("SEZ") ||
+    invoice.urType?.startsWith("EXP");
   return {
     igst: interstate ? tax : 0,
     cgst: interstate ? 0 : round(tax / 2),
     sgst: interstate ? 0 : round(tax - round(tax / 2)),
-    cess: amount(invoice.cess),
+    cess: ["B2CS", "B2CSA", "ATA", "TXPA"].includes(invoice.section)
+      ? returnRules.signed(invoice.cess)
+      : amount(invoice.cess),
   };
 }
 function freshPeriod(sales = [], purchases = [], homeState = "Karnataka") {
@@ -160,6 +181,7 @@ function ensureWorkspace(state, label) {
       registration: { stage: "new", partA: {}, tabs: {}, savedTabs: [] },
     };
   }
+  extensions.init(state.workspace);
   flow.setFrequency(state.workspace);
   state.workspace.homeState = state.taxpayer.state;
   return state.workspace;
@@ -170,7 +192,7 @@ function getPeriod(workspace, key = workspace.period) {
 }
 function summary(period) {
   const rows = period.invoices.filter(
-    (i) => !["HSN", "DOCS", "NIL"].includes(i.section),
+    (i) => !["HSN", "DOCS", "NIL", "ECO", "ECOA"].includes(i.section),
   );
   const invoiceKey = (i) => i.originalNumber || i.number;
   // An amendment replaces its original in this period rather than counting both.
@@ -230,7 +252,11 @@ function validateInvoice(
   allowedPeriods = [period],
 ) {
   if (!SECTIONS.includes(input.section)) fail("Select a valid GSTR-1 section.");
+  if (eco.SECTIONS.includes(input.section))
+    fail("Use the dedicated Table 14/15 e-commerce form for these records.");
   const section = input.section;
+  const signedAggregate = ["B2CS", "B2CSA", "ATA", "TXPA"].includes(section);
+  const entryAmount = signedAggregate ? returnRules.signed : amount;
   const aggregate = [
     "B2CS",
     "B2CSA",
@@ -245,18 +271,31 @@ function validateInvoice(
     "ECOA",
   ].includes(section);
   const number = String(input.number || "").trim();
-  if (!number || number.length > 30)
+  if (
+    !number ||
+    (aggregate ? number.length > 30 : !/^[A-Za-z0-9/-]{1,16}$/.test(number))
+  )
     fail(
       aggregate
         ? "Enter a description or reference for this record."
-        : "Enter an invoice or note number (maximum 30 characters).",
+        : "Enter an invoice or note number using 1 to 16 letters, numbers, hyphens or slashes.",
     );
+  const regularInvoice = ["B2B", "B2CL", "EXP"].includes(section);
   if (
     existing.some(
-      (i) => i.id !== input.id && i.number === number && i.section === section,
+      (i) =>
+        i.id !== input.id &&
+        String(i.number).toUpperCase() === number.toUpperCase() &&
+        (regularInvoice
+          ? ["B2B", "B2CL", "EXP"].includes(i.section)
+          : i.section === section),
     )
   )
-    fail("This document number already exists in this section.");
+    fail(
+      aggregate
+        ? "This reference already exists in this table."
+        : "This document number already exists for the financial year.",
+    );
   const gstin = String(input.gstin || "")
     .trim()
     .toUpperCase();
@@ -266,14 +305,7 @@ function validateInvoice(
   )
     fail("Enter a valid 15-character recipient GSTIN/UIN.");
   const date = String(input.date || "");
-  if (
-    !aggregate &&
-    (!/^\d{4}-\d{2}-\d{2}$/.test(date) ||
-      !flow.validDate(date) ||
-      (!allowedPeriods.includes(date.slice(0, 7)) &&
-        !(section.endsWith("A") && date.slice(0, 7) === input.originalPeriod)))
-  )
-    fail("Document date must fall within the selected return period.");
+  if (!aggregate) returnRules.reporting(date, period);
   const rate = amount(input.rate, "Tax rate");
   if (![0, 0.1, 0.25, 1, 1.5, 3, 5, 6, 7.5, 12, 18, 28, 40].includes(rate))
     fail("Select an available tax rate.");
@@ -294,13 +326,14 @@ function validateInvoice(
     recipient: String(input.recipient || "").slice(0, 150),
     place: input.place || "Outside India",
     rate,
-    taxable: amount(input.taxable, "Taxable value"),
-    cess: amount(input.cess),
+    taxable: entryAmount(input.taxable, "Taxable value"),
+    cess: entryAmount(input.cess),
     noteType: input.noteType || "Credit Note",
     exportType: input.exportType || "With payment of tax",
     originalNumber: String(input.originalNumber || ""),
     originalPeriod: input.originalPeriod || "",
     hsn: input.hsn || "",
+    productName: String(input.productName || "").slice(0, 150),
     ...(section === "HSN"
       ? { hsnDescription: hsnMaster.lookup(input.hsn)?.description || "" }
       : {}),
@@ -312,6 +345,12 @@ function validateInvoice(
     toSerial: input.toSerial || "",
     supplyType: input.supplyType || "Intra-state",
     reverseCharge: Boolean(input.reverseCharge),
+    supplyCategory: ["B2B", "B2BA", "CDNR", "CDNRA"].includes(section)
+      ? input.supplyCategory || "Regular"
+      : "Regular",
+    differential: Boolean(input.differential),
+    intraStateIgst: Boolean(input.intraStateIgst),
+    urType: section.startsWith("CDNUR") ? input.urType || "B2CL" : "B2CL",
     portCode: String(input.portCode || "")
       .toUpperCase()
       .slice(0, 6),
@@ -320,8 +359,27 @@ function validateInvoice(
     nilType: input.nilType || "Nil Rated",
     recipientType: input.recipientType || "Registered",
     documentType: String(input.documentType || "1"),
-    reportedTaxes: input.reportedTaxes ? heads(input.reportedTaxes) : undefined,
+    reportedTaxes: input.reportedTaxes
+      ? signedAggregate
+        ? returnRules.signedHeads(input.reportedTaxes)
+        : heads(input.reportedTaxes)
+      : undefined,
   };
+  if (
+    !["Regular", "DeemedExport", "SEZWP", "SEZWOP"].includes(row.supplyCategory)
+  )
+    fail("Select a valid supply category.");
+  if (
+    row.intraStateIgst &&
+    (!row.reverseCharge ||
+      row.place !== homeState ||
+      !["B2B", "B2BA", "CDNR", "CDNRA"].includes(section))
+  )
+    fail(
+      "Intra-State supplies attracting IGST require a registered reverse-charge supply in the supplier's state.",
+    );
+  if (!["B2CL", "EXPWP", "EXPWOP"].includes(row.urType))
+    fail("Select a valid unregistered note type.");
   if (
     section.startsWith("EXP") &&
     row.shippingBillDate &&
@@ -340,19 +398,79 @@ function validateInvoice(
       const rate = amount(item.rate, "Tax rate");
       if (![0, 0.1, 0.25, 1, 1.5, 3, 5, 6, 7.5, 12, 18, 28, 40].includes(rate))
         fail("Select an available tax rate.");
-      return { rate, taxable: amount(item.taxable), cess: amount(item.cess) };
+      const line = {
+        rate,
+        taxable: amount(item.taxable),
+        cess: amount(item.cess),
+      };
+      const calculated = taxFor({ ...row, ...line }, homeState);
+      if (item.taxes) {
+        const entered = heads({
+          ...calculated,
+          ...item.taxes,
+          cess: line.cess,
+        });
+        // Editable portal amounts remain constrained to the applicable tax heads.
+        const interstate =
+          row.place !== homeState ||
+          row.intraStateIgst ||
+          section.startsWith("EXP") ||
+          row.supplyCategory.startsWith("SEZ") ||
+          (row.urType.startsWith("EXP") && section.startsWith("CDNUR"));
+        const withoutPayment =
+          row.supplyCategory === "SEZWOP" ||
+          (row.urType === "EXPWOP" && section.startsWith("CDNUR")) ||
+          (section.startsWith("EXP") &&
+            row.exportType === "Without payment of tax");
+        if (withoutPayment && total(entered))
+          fail("Tax must be zero for supplies without payment of tax.");
+        if (interstate ? entered.cgst || entered.sgst : entered.igst)
+          fail(
+            "Use Integrated Tax for inter-State supplies, or Central and State/UT Tax for intra-State supplies.",
+          );
+        line.taxes = entered;
+      }
+      return line;
     });
     row.taxable = round(row.items.reduce((n, i) => n + i.taxable, 0));
+    row.cess = round(row.items.reduce((n, i) => n + i.cess, 0));
     row.taxes = row.items.reduce(
-      (out, item) => add(out, taxFor({ ...row, ...item }, homeState)),
+      (out, item) =>
+        add(out, item.taxes || taxFor({ ...row, ...item }, homeState)),
       zeros(),
     );
   } else row.taxes = taxFor(row, homeState);
+  if (["B2CS", "B2CSA"].includes(section) && row.reportedTaxes) {
+    row.taxes = (signedAggregate ? returnRules.signedHeads : heads)({
+      ...row.taxes,
+      ...input.reportedTaxes,
+      cess: row.cess,
+    });
+    if (
+      row.place === homeState
+        ? row.taxes.igst
+        : row.taxes.cgst || row.taxes.sgst
+    )
+      fail("Enter tax only under the heads applicable to the place of supply.");
+    row.reportedTaxes = { ...row.taxes };
+  }
   if (section === "HSN" && row.reportedTaxes) row.taxes = row.reportedTaxes;
   row.invoiceValue =
     input.invoiceValue !== undefined && input.invoiceValue !== ""
-      ? amount(input.invoiceValue, "Invoice value")
+      ? entryAmount(input.invoiceValue, "Invoice value")
       : round(row.taxable + total(row.taxes));
+  if (["B2CL", "B2CLA"].includes(section)) {
+    const threshold =
+      (row.originalPeriod || period) < "2024-08" ? 250000 : 100000;
+    if (row.place === homeState)
+      fail(
+        "Report intra-State consumer supplies in B2C (Others), not B2C (Large).",
+      );
+    if (row.invoiceValue <= threshold)
+      fail(
+        `B2C (Large) requires an invoice value above ₹${threshold.toLocaleString("en-IN")}. Use B2C (Others) for smaller supplies.`,
+      );
+  }
   return row;
 }
 function allocation(liability, credit, cash) {
@@ -404,27 +522,90 @@ function paymentPlan(period, workspace) {
       ...period,
       invoices: period.invoices.filter((i) => !i.reverseCharge),
     }).taxes;
-  const creditable = Object.fromEntries(
-    HEADS.map((h) => [h, Math.max(0, add(output, tables["3.1.1"]?.taxes)[h])]),
-  );
+  const negativeBefore = workspace.negativeLiability || {};
+  const negativeUsed = {},
+    negativeAdded = {},
+    negativeAfter = {};
+  const netTax = (input, category) => {
+    negativeUsed[category] = zeros();
+    negativeAdded[category] = zeros();
+    negativeAfter[category] = zeros();
+    return Object.fromEntries(
+      HEADS.map((h) => {
+        const value = Number(input?.[h] || 0),
+          before = Number(negativeBefore[category]?.[h] || 0);
+        negativeUsed[category][h] = round(Math.min(Math.max(value, 0), before));
+        negativeAdded[category][h] = round(Math.max(0, -value));
+        negativeAfter[category][h] = round(
+          before + negativeAdded[category][h] - negativeUsed[category][h],
+        );
+        return [h, round(Math.max(value, 0) - negativeUsed[category][h])];
+      }),
+    );
+  };
+  const netOutput = netTax(output, "outward");
+  const creditable = { ...netOutput };
   const itc = tables["4"]?.taxes || eligibleCredit(period);
-  const reversal = tables["4b"]?.taxes || zeros();
-  const recognizedItc = Object.fromEntries(
-    HEADS.map((h) => [h, round(Math.max(0, itc[h] - reversal[h]))]),
-  );
+  const reversal =
+    tables["4b"]?.taxes ||
+    add(tables["4"]?.rows?.b1?.taxes, tables["4"]?.rows?.b2?.taxes);
+  const recognizedItc = {},
+    reversalCash = {};
+  for (const h of HEADS) {
+    const net = round((itc[h] || 0) - (reversal[h] || 0));
+    recognizedItc[h] = Math.max(net, -(workspace.credit[h] || 0));
+    reversalCash[h] = Math.max(0, -net - (workspace.credit[h] || 0));
+  }
   const availableCredit = add(workspace.credit, recognizedItc);
   const plan = allocation(creditable, availableCredit, workspace.cash);
+  plan.negativeLiability = {
+    before: negativeBefore,
+    used: negativeUsed,
+    added: negativeAdded,
+    after: negativeAfter,
+  };
   plan.recognizedItc = recognizedItc;
   plan.availableCredit = availableCredit;
-  const cashOnly = add(tables["5.1"]?.taxes, tables["3.1d"]?.taxes);
-  plan.liability = add(plan.liability, cashOnly);
-  plan.cashUsed = add(plan.cashUsed, cashOnly);
-  plan.shortfall = Object.fromEntries(
+  const rcm = tables["3.1d"]?.taxes || tables["3.1"]?.rows?.d?.taxes;
+  // Section 9(5) operator liability is cash-only, like reverse-charge tax.
+  const cashOnlyTax = add(
+    add(netTax(rcm, "reverseCharge"), netTax(tables["3.1.1"]?.taxes, "eco95")),
+    reversalCash,
+  );
+  plan.taxCashUsed = add(plan.cashUsed, cashOnlyTax);
+  plan.cashUsed = { ...plan.taxCashUsed };
+  plan.cashCategoriesUsed = {
+    interest: heads(tables["5.1"]?.rows?.interest?.taxes),
+    fee: heads(tables["5.1"]?.rows?.latefee?.taxes),
+  };
+  plan.taxShortfall = Object.fromEntries(
     HEADS.map((h) => [
       h,
-      round(Math.max(0, plan.cashUsed[h] - workspace.cash[h])),
+      round(Math.max(0, plan.taxCashUsed[h] - (workspace.cash[h] || 0))),
     ]),
   );
+  plan.minorShortfall = {};
+  for (const [category, amounts] of Object.entries(plan.cashCategoriesUsed)) {
+    plan.minorShortfall[category] = Object.fromEntries(
+      HEADS.map((h) => [
+        h,
+        round(
+          Math.max(
+            0,
+            amounts[h] - (workspace.cashCategories?.[category]?.[h] || 0),
+          ),
+        ),
+      ]),
+    );
+    plan.cashUsed = add(plan.cashUsed, amounts);
+  }
+  plan.taxLiability = add(plan.liability, cashOnlyTax);
+  plan.liability = add(plan.taxLiability, tables["5.1"]?.taxes);
+  plan.shortfall = Object.values(plan.minorShortfall).reduce(
+    add,
+    plan.taxShortfall,
+  );
+
   return plan;
 }
 function viewState(state, label) {
@@ -433,6 +614,7 @@ function viewState(state, label) {
   const q = flow.quarterInfo(w.period);
   const outward = flow.returnData(w, p, "gstr1"),
     monthly = flow.returnData(w, p);
+  extensions.projection(w);
   w.registrationSignatories = registrationPeople.signatories(w.registration);
   w.documentDate = eway.workingDate(w);
   w.ewayMasters = {
@@ -455,12 +637,27 @@ function viewState(state, label) {
     invoices: monthly.invoices.filter((i) => !i.reverseCharge),
   });
   w.eligibleItc = eligibleCredit(monthly);
-  w.paymentPlan = paymentPlan(monthly, w);
+  w.paymentPlan =
+    ["Offset", "Filed"].includes(p.gstr3b.status) && p.gstr3b.offset
+      ? structuredClone(p.gstr3b.offset)
+      : paymentPlan(monthly, w);
   return state;
 }
 function publicState(state) {
   const out = structuredClone(state);
-  if (out.workspace) delete out.workspace.documentCaptchas;
+  if (out.workspace) {
+    delete out.workspace.documentCaptchas;
+    if (out.workspace.registration)
+      out.workspace.registration = practiceDocuments.sanitize(
+        out.workspace.registration,
+        { legacy: true },
+      );
+    if (out.workspace.registrationHistory)
+      out.workspace.registrationHistory = practiceDocuments.sanitize(
+        out.workspace.registrationHistory,
+        { legacy: true },
+      );
+  }
   for (const account of Object.values(out.workspace?.documentPortals || {})) {
     delete account.passwordHash;
     delete account.salt;
@@ -476,6 +673,17 @@ function mountPortal(app, deps) {
     getOtpService,
     completeRegistration,
   } = deps;
+  const yearInvoices = (w) =>
+    Object.entries(w.periods)
+      .filter(
+        ([period]) =>
+          flow.financialYear(period) === flow.financialYear(w.period),
+      )
+      .flatMap(([, data]) => data.invoices);
+  const invoiceCandidates = (w, p, section) =>
+    ["B2B", "B2CL", "EXP", "CDNR", "CDNUR"].includes(section)
+      ? yearInvoices(w)
+      : flow.returnData(w, p, "gstr1").invoices;
   const otpScope = (ctx, w, purpose) =>
     `${ctx.user.id}:${ctx.active.slug}:${purpose}${purpose.startsWith("gstr") ? ":" + w.period : ""}`;
   const signingBinding = (purpose, body, w, p) => ({
@@ -488,7 +696,13 @@ function mountPortal(app, deps) {
         ? { revision: p.gstr1.revision, summary: p.gstr1.summary }
         : purpose === "gstr3b-file"
           ? { offset: p.gstr3b.offset, tables: p.gstr3b.tables }
-          : { partA: w.registration.partA, tabs: w.registration.tabs },
+          : purpose === "pmt09-file"
+            ? {
+                draft: w.pmt09Draft,
+                cash: w.cash,
+                categories: w.cashCategories,
+              }
+            : { partA: w.registration.partA, tabs: w.registration.tabs },
   });
   const signingCheck = async (body, purpose, w, p, ctx) => {
     if (!body.declaration || !body.signatory)
@@ -501,7 +715,7 @@ function mountPortal(app, deps) {
       binding: signingBinding(purpose, body, w, p),
     });
   };
-  const route = (path, handler) =>
+  const route = (path, handler, { readOnly = false } = {}) =>
     app.post(`/api/workspace/${path}`, async (req, res, next) => {
       try {
         const ctx = await activeFor(req, res);
@@ -519,12 +733,17 @@ function mountPortal(app, deps) {
         if (req.body?.period) {
           checkPeriod(req.body.period);
           w.period = req.body.period;
+          if (w.returnAsOf && w.returnAsOf < `${w.period}-01`)
+            delete w.returnAsOf;
         }
         flow.setFrequency(w);
         const p = getPeriod(w);
+        extensions.init(w);
+        if (!readOnly && !path.startsWith("registration/"))
+          irp.sync(w, ctx.active.state.taxpayer, validateInvoice);
         const result = (await handler(req.body || {}, w, p, ctx)) || {};
         if (path === "registration/submit") await completeRegistration(ctx);
-        else
+        else if (!readOnly)
           await saveState(
             ctx.user.id,
             ctx.active.slug,
@@ -533,7 +752,13 @@ function mountPortal(app, deps) {
           );
         res.json({
           ...result,
-          state: publicState(viewState(ctx.active.state, ctx.active.period)),
+          ...(!readOnly
+            ? {
+                state: publicState(
+                  viewState(ctx.active.state, ctx.active.period),
+                ),
+              }
+            : {}),
         });
       } catch (error) {
         if (error.status)
@@ -588,7 +813,14 @@ function mountPortal(app, deps) {
   });
   route("signing/send", async (body, w, p, ctx) => {
     const purpose = body.purpose;
-    if (!["gstr1-file", "gstr3b-file", "registration-submit"].includes(purpose))
+    if (
+      ![
+        "gstr1-file",
+        "gstr3b-file",
+        "registration-submit",
+        "pmt09-file",
+      ].includes(purpose)
+    )
       fail("Select a valid verification purpose.");
     if (!body.signatory || !["EVC", "DSC"].includes(body.method))
       fail("Select the authorised signatory and filing method first.");
@@ -609,6 +841,12 @@ function mountPortal(app, deps) {
       fail(
         "Complete the registration application before requesting a submission OTP.",
       );
+    if (purpose === "pmt09-file") {
+      if (!w.pmt09Draft)
+        fail("Save a cash-transfer draft before requesting an OTP.");
+      extensions.transferPreview(w, w.pmt09Draft.rows);
+    }
+    if (purpose === "gstr1-file") extensions.processingGuard(p);
     const otp = await getOtpService().issue({
       scope: otpScope(ctx, w, purpose),
       userId: ctx.user.id,
@@ -625,15 +863,24 @@ function mountPortal(app, deps) {
       body.invoice || {},
       w.period,
       ctx.active.state.taxpayer.state,
-      flow.returnData(w, p, "gstr1").invoices,
+      invoiceCandidates(w, p, body.invoice?.section),
       w.filingFrequency === "QRMP" && flow.quarterInfo(w.period).isEnd
         ? flow.quarterInfo(w.period).periods
         : [w.period],
     );
+    if (!body.invoice?.id && body.invoice?.date)
+      returnRules.reporting(body.invoice.date, w.period, {
+        asOf: ims.asOf(w),
+        annualFiled: w.annualReturns?.[returnRules.fy(body.invoice.date)],
+      });
     if (row.originalNumber) {
       if (
         p.invoices.some(
-          (i) => i.originalNumber === row.originalNumber && i.id !== row.id,
+          (i) =>
+            i.section === row.section &&
+            i.originalNumber === row.originalNumber &&
+            i.originalPeriod === row.originalPeriod &&
+            i.id !== row.id,
         )
       )
         fail(
@@ -651,16 +898,74 @@ function mountPortal(app, deps) {
           fail(
             "The original document must belong to a filed return in the selected original period.",
           );
+        returnRules.reporting(
+          original.date || `${row.originalPeriod}-01`,
+          w.period,
+          {
+            asOf: w.returnAsOf,
+            annualFiled:
+              w.annualReturns?.[
+                returnRules.fy(original.date || row.originalPeriod)
+              ],
+          },
+        );
+        const priorAmendment = Object.entries(w.periods)
+          .filter(
+            ([period, data]) =>
+              period < w.period && data.gstr1.status === "Filed",
+          )
+          .sort(([a], [b]) => b.localeCompare(a))
+          .flatMap(([, data]) => data.invoices)
+          .find(
+            (i) =>
+              i.section === row.section &&
+              i.originalNumber === row.originalNumber &&
+              i.originalPeriod === row.originalPeriod,
+          );
+        const baseline = priorAmendment || original;
         row.amendmentBaseline = {
-          taxable: original.taxable,
-          taxes: original.taxes,
+          taxable: baseline.taxable,
+          taxes: baseline.taxes,
         };
       }
     }
-    const index = p.invoices.findIndex((i) => i.id === row.id);
+    const editablePeriods =
+      w.filingFrequency === "QRMP" && flow.quarterInfo(w.period).isEnd
+        ? flow.quarterInfo(w.period).periods
+        : [w.period];
+    const owner = body.invoice?.id
+      ? editablePeriods
+          .map((period) => w.periods[period])
+          .find((data) => data?.invoices.some((i) => i.id === row.id))
+      : p;
+    if (owner && owner !== p && owner.gstr1.status === "Filed")
+      fail(
+        "An invoice in a filed IFF cannot be edited. Use the amendment table.",
+      );
+    const index = owner?.invoices.findIndex((i) => i.id === row.id) ?? -1;
     if (body.invoice?.id && index < 0) fail("Document not found.");
-    if (index >= 0) p.invoices[index] = row;
-    else p.invoices.push(row);
+    if (index >= 0) {
+      const prior = owner.invoices[index];
+      if (prior.irn || prior.sourceIrn)
+        Object.assign(row, {
+          sourceIrn: prior.sourceIrn || prior.irn,
+          sourceDocumentId: prior.sourceDocumentId,
+          irn: "",
+          irnDate: "",
+          irnEdited: true,
+          source: "E-Invoice (edited)",
+        });
+      if (prior.ewayBillNumbers?.length)
+        row.ewayBillNumbers = prior.ewayBillNumbers;
+      if (prior.ewayBillNumber) row.ewayBillNumber = prior.ewayBillNumber;
+      if (prior.source)
+        row.source = `${prior.source.replace(/ \(edited\)$/, "")} (edited)`;
+      owner.invoices[index] = row;
+      if (owner !== p) {
+        owner.gstr1.revision++;
+        delete owner.gstr1.summary;
+      }
+    } else p.invoices.push(row);
     p.gstr1.revision += 1;
     p.gstr1.status = "In Progress";
     delete p.gstr1.summary;
@@ -668,11 +973,217 @@ function mountPortal(app, deps) {
   });
   route("invoice/delete", (body, w, p) => {
     flow.assertWritable(w, p);
-    if (!p.invoices.some((i) => i.id === body.id)) fail("Document not found.");
-    p.invoices = p.invoices.filter((i) => i.id !== body.id);
+    const periods =
+      w.filingFrequency === "QRMP" && flow.quarterInfo(w.period).isEnd
+        ? flow.quarterInfo(w.period).periods
+        : [w.period];
+    const owner = periods
+      .map((period) => w.periods[period])
+      .find((data) => data?.invoices.some((i) => i.id === body.id));
+    if (!owner) fail("Document not found.");
+    if (owner !== p && owner.gstr1.status === "Filed")
+      fail(
+        "An invoice in a filed IFF cannot be deleted. Use the amendment table.",
+      );
+    const removed = owner.invoices.find((i) => i.id === body.id);
+    if (removed?.sourceDocumentId) {
+      const sourceDoc = w.documents.einvoice.find(
+        (d) => d.id === removed.sourceDocumentId,
+      );
+      if (sourceDoc) sourceDoc.irpSuppressed = true;
+    }
+    eco.checkPosAmendments(
+      w,
+      p.invoices.filter((i) => i.id !== body.id),
+    );
+    owner.invoices = owner.invoices.filter((i) => i.id !== body.id);
+    if (owner !== p) {
+      owner.gstr1.revision++;
+      delete owner.gstr1.summary;
+    }
     p.gstr1.revision += 1;
     delete p.gstr1.summary;
     return { message: "Document deleted." };
+  });
+  route("gstr1/import-ewb", (body, w, p, ctx) => {
+    flow.assertWritable(w, p);
+    if (!["B2B", "B2CL", "EXP", "B2CS"].includes(body.section))
+      fail("Select a supported e-way bill import table.");
+    flow.assertIff(w, body.section);
+    if (
+      !Array.isArray(body.ids) ||
+      !body.ids.length ||
+      body.ids.length > 500 ||
+      new Set(body.ids).size !== body.ids.length
+    )
+      fail("Select between 1 and 500 distinct e-way bills.");
+    const accepted = [],
+      errors = [];
+    const allowedPeriods =
+      w.filingFrequency === "QRMP" && flow.quarterInfo(w.period).isEnd
+        ? flow.quarterInfo(w.period).periods
+        : [w.period];
+    for (const [index, id] of body.ids.entries()) {
+      const doc = w.documents.eway.find((item) => item.id === id);
+      try {
+        if (
+          !doc ||
+          doc.status !== "Active" ||
+          doc.supplyType !== "Outward" ||
+          doc.seller?.gstin !== ctx.active.state.taxpayer.gstin ||
+          doc.documentType !== "Tax Invoice"
+        )
+          fail(
+            "Select an active outward Tax Invoice e-way bill generated by this taxpayer.",
+          );
+        if (!allowedPeriods.includes(doc.invoice.date.slice(0, 7)))
+          fail("The invoice is outside the selected return period.");
+        if (
+          [...flow.returnData(w, p, "gstr1").invoices, ...accepted].some(
+            (row) =>
+              row.ewayBillNumber === doc.number ||
+              row.ewayBillNumbers?.includes(doc.number),
+          )
+        )
+          fail(
+            "This e-way bill has already been imported. Edit its processed record instead.",
+          );
+        const registered = doc.invoice.gstin !== "URP";
+        if (body.section === "B2B" && !registered)
+          fail("Use the unregistered supply tables for this recipient.");
+        if (["B2CL", "B2CS"].includes(body.section) && registered)
+          fail("Use B2B for a registered recipient.");
+        if (
+          body.section === "EXP" &&
+          !["Export", "Export with payment", "Export without payment"].includes(
+            doc.subType,
+          )
+        )
+          fail("Select an export e-way bill for the exports table.");
+        if (body.section !== "EXP" && doc.subType?.startsWith("Export"))
+          fail("Report export e-way bills in the exports table.");
+        const input = {
+          ...doc.invoice,
+          section: body.section,
+          place: doc.place,
+          rate: doc.items[0]?.rate || 0,
+          gstin: registered ? doc.invoice.gstin : "",
+          recipient: doc.invoice.recipient,
+          items: doc.items.map((line) => ({
+            rate: line.rate,
+            taxable: line.taxable,
+            cess: line.taxes?.cess || 0,
+            taxes: line.taxes,
+          })),
+        };
+        if (body.section === "EXP")
+          input.exportType = total(doc.invoice.taxes)
+            ? "With payment of tax"
+            : "Without payment of tax";
+        if (body.section === "B2CS") {
+          const threshold = w.period < "2024-08" ? 250000 : 100000;
+          if (
+            doc.place !== ctx.active.state.taxpayer.state &&
+            doc.invoice.invoiceValue > threshold
+          )
+            fail("Report this inter-State consumer invoice in B2C (Large).");
+          const byRate = new Map();
+          for (const item of input.items) {
+            const previous = byRate.get(item.rate) || {
+              rate: item.rate,
+              taxable: 0,
+              cess: 0,
+              taxes: zeros(),
+            };
+            byRate.set(item.rate, {
+              rate: item.rate,
+              taxable: round(previous.taxable + item.taxable),
+              cess: round(previous.cess + item.cess),
+              taxes: add(previous.taxes, item.taxes),
+            });
+          }
+          const staged = [...accepted];
+          for (const item of byRate.values()) {
+            const existing = [...staged, ...p.invoices].find(
+              (row) =>
+                row.section === "B2CS" &&
+                row.place === doc.place &&
+                row.rate === item.rate &&
+                !row.differential,
+            );
+            const row = validateInvoice(
+              {
+                ...input,
+                ...item,
+                items: undefined,
+                id: existing?.id,
+                number: existing?.number || `EWB-${doc.number}-${item.rate}`,
+                taxable: round((existing?.taxable || 0) + item.taxable),
+                cess: round((existing?.cess || 0) + item.cess),
+                invoiceValue: undefined,
+                reportedTaxes: add(existing?.taxes, item.taxes),
+              },
+              w.period,
+              ctx.active.state.taxpayer.state,
+              [...p.invoices, ...staged],
+              allowedPeriods,
+            );
+            row.source = "E-way bill";
+            row.ewayBillNumbers = [
+              ...(existing?.ewayBillNumbers || []),
+              doc.number,
+            ];
+            const at = staged.findIndex((old) => old.id === row.id);
+            if (at < 0) staged.push(row);
+            else staged[at] = row;
+          }
+          accepted.splice(0, accepted.length, ...staged);
+          continue;
+        }
+        const row = validateInvoice(
+          input,
+          w.period,
+          ctx.active.state.taxpayer.state,
+          [...invoiceCandidates(w, p, body.section), ...accepted],
+          allowedPeriods,
+        );
+        row.source = "E-way bill";
+        row.ewayBillNumber = doc.number;
+        accepted.push(row);
+      } catch (error) {
+        errors.push({
+          row: index + 1,
+          section: body.section,
+          gstin: doc?.invoice.gstin || "",
+          number: doc?.invoice.number || "",
+          error: error.message,
+        });
+      }
+    }
+    if (accepted.length) {
+      const changed = new Map(accepted.map((row) => [row.id, row]));
+      p.invoices = [
+        ...p.invoices.filter((row) => !changed.has(row.id)),
+        ...changed.values(),
+      ];
+      p.gstr1.revision++;
+      p.gstr1.status = "In Progress";
+      delete p.gstr1.summary;
+    }
+    p.uploads.unshift({
+      id: uid(),
+      name: "e-Way Bill Import",
+      type: "GSTR-1",
+      accepted: accepted.length,
+      errors,
+      status: errors.length ? "Processed with errors" : "Processed",
+      at: stamp(),
+    });
+    return {
+      accepted: accepted.length,
+      errors,
+      message: `${accepted.length} e-way bill record(s) imported${errors.length ? `; ${errors.length} require attention` : " successfully"}.`,
+    };
   });
   route("nil/save", (body, w, p, ctx) => {
     flow.assertWritable(w, p);
@@ -710,8 +1221,22 @@ function mountPortal(app, deps) {
     delete p.gstr1.summary;
     return { message: "Nil-rated supplies saved." };
   });
+  const checkReporting = (w) => {
+    for (const row of flow.returnData(w, getPeriod(w), "gstr1").invoices) {
+      const sourceDate = row.originalPeriod
+        ? `${row.originalPeriod}-01`
+        : row.date;
+      if (sourceDate)
+        returnRules.reporting(sourceDate, w.period, {
+          asOf: ims.asOf(w),
+          annualFiled: w.annualReturns?.[returnRules.fy(sourceDate)],
+        });
+    }
+  };
   route("gstr1/summary", (body, w, p) => {
     flow.assertWritable(w, p);
+    extensions.processingGuard(p);
+    checkReporting(w);
     const data = flow.returnData(w, p, "gstr1");
     if (w.filingFrequency === "QRMP" && !flow.quarterInfo(w.period).isEnd)
       data.invoices.forEach((i) => flow.assertIff(w, i.section));
@@ -724,6 +1249,8 @@ function mountPortal(app, deps) {
   });
   route("gstr1/file", async (body, w, p, ctx) => {
     flow.assertWritable(w, p);
+    extensions.processingGuard(p);
+    checkReporting(w);
     if (p.gstr1.status === "Filed") fail("This return has already been filed.");
     if (w.period > w.initialPeriod && w.filingFrequency !== "QRMP") {
       const previousDate = new Date(`${w.period}-01T00:00:00Z`);
@@ -775,6 +1302,24 @@ function mountPortal(app, deps) {
       );
     if (body.table) {
       const result = flow.validate3b(body.table, body.rows || {});
+      if (body.table === "5.1" && p.gstr3b.charges) {
+        if (
+          HEADS.some(
+            (h) => result.rows.latefee.taxes[h] !== p.gstr3b.charges.latefee[h],
+          )
+        )
+          fail(
+            "System-calculated late fee cannot be edited. Use Re-compute Interest after any notified calendar change.",
+          );
+        if (
+          HEADS.some(
+            (h) => result.rows.interest.taxes[h] < p.gstr3b.charges.interest[h],
+          )
+        )
+          fail(
+            "Interest cannot be reduced below the system calculation. Recompute it if the inputs changed.",
+          );
+      }
       p.gstr3b.tables[body.table] = result;
       if (body.table === "3.1") p.gstr3b.tables["3.1d"] = result.rows.d;
       if (body.table === "4")
@@ -796,6 +1341,10 @@ function mountPortal(app, deps) {
       fail("Save the GSTR-3B details before making payment.");
     if (p.gstr1.status !== "Filed")
       fail("File GSTR-1 for this period before filing GSTR-3B.");
+    if (p.gstr2b && p.gstr2b.sourceRevision !== ims.revision(w))
+      fail(
+        "Recompute GSTR-2B after the latest IMS or supplier-data changes before offsetting liability.",
+      );
     const plan = paymentPlan(flow.returnData(w, p), w);
     if (total(plan.shortfall))
       fail(
@@ -805,7 +1354,15 @@ function mountPortal(app, deps) {
       w.credit[h] = round(
         w.credit[h] + plan.recognizedItc[h] - plan.creditUsed[h],
       );
-      w.cash[h] = round(w.cash[h] - plan.cashUsed[h]);
+      w.cash[h] = round(w.cash[h] - plan.taxCashUsed[h]);
+      for (const [category, amounts] of Object.entries(
+        plan.cashCategoriesUsed,
+      )) {
+        w.cashCategories[category] ||= zeros();
+        w.cashCategories[category][h] = round(
+          w.cashCategories[category][h] - amounts[h],
+        );
+      }
     });
     w.ledger.unshift({
       id: uid(),
@@ -815,6 +1372,13 @@ function mountPortal(app, deps) {
       credit: plan.recognizedItc,
       reference: `ITC-${w.period}`,
     });
+    w.negativeLiability = structuredClone(plan.negativeLiability.after);
+    w.negativeLiabilityHistory ||= [];
+    w.negativeLiabilityHistory.unshift({
+      period: w.period,
+      date: stamp(),
+      ...structuredClone(plan.negativeLiability),
+    });
     p.gstr3b.offset = plan;
     p.gstr3b.status = "Offset";
     w.ledger.unshift({
@@ -822,7 +1386,8 @@ function mountPortal(app, deps) {
       date: stamp(),
       type: "Liability offset",
       period: w.period,
-      debit: plan.cashUsed,
+      debit: plan.taxCashUsed,
+      debitCategories: { tax: plan.taxCashUsed, ...plan.cashCategoriesUsed },
       creditDebit: plan.creditUsed,
       reference: `OFFSET-${Date.now()}`,
     });
@@ -833,22 +1398,66 @@ function mountPortal(app, deps) {
     if (p.gstr3b.status !== "Offset")
       fail("Offset the liability before filing GSTR-3B.");
     await signingCheck(body, "gstr3b-file", w, p, ctx);
+    ims.finalize(w);
     p.gstr3b.status = "Filed";
     p.gstr3b.arn = `AA${crypto.randomInt(1000000000000, 9999999999999)}`;
     p.gstr3b.filedAt = stamp();
     return { message: `GSTR-3B filed successfully. ARN: ${p.gstr3b.arn}` };
   });
   route("challan/create", (body, w) => {
-    const amounts = heads(body.amounts);
-    if (!total(amounts)) fail("Enter at least one tax amount.");
+    let fixedSum;
+    if (body.challanType === "Fixed sum basis") {
+      if (w.filingFrequency !== "QRMP" || flow.quarterInfo(w.period).isEnd)
+        fail(
+          "Fixed-sum PMT-06 is available for months 1 and 2 of a QRMP quarter.",
+        );
+      fixedSum = returnRules.fixedSum(w, w.period);
+      body = {
+        ...body,
+        amounts: fixedSum.amounts,
+        deposits: { tax: fixedSum.amounts },
+      };
+    }
+    const deposits = challanRules.deposits(body);
+    const amounts = deposits.tax,
+      grandTotal = challanRules.sum(deposits);
+    if (!grandTotal) fail("Enter at least one deposit amount.");
+    const mode = body.mode || "E-Payment";
+    if (!["E-Payment", "NEFT / RTGS", "Over the Counter"].includes(mode))
+      fail("Select a valid payment mode.");
+    if (mode !== "E-Payment" && !String(body.bank || "").trim())
+      fail("Select the remitting bank before generating this challan.");
+    if (mode === "Over the Counter") {
+      if (!["Cash", "Cheque", "Demand Draft"].includes(body.instrument))
+        fail("Select Cash, Cheque or Demand Draft.");
+      const previous = w.challans
+        .filter(
+          (c) =>
+            c.mode === mode &&
+            c.period === w.period &&
+            c.status !== "Expired" &&
+            (c.status === "Paid" ||
+              Date.now() < new Date(challanRules.expiry(c)).valueOf()),
+        )
+        .reduce((sum, c) => sum + c.total, 0);
+      if (grandTotal + previous > 10000)
+        fail(
+          "Over-the-Counter challans cannot exceed ₹10,000 in total for this tax period. Select another payment mode.",
+        );
+    }
     const challan = {
       id: uid(),
       cpin: String(crypto.randomInt(10000000000000, 99999999999999)),
       amounts,
-      total: total(amounts),
+      deposits,
+      ...(fixedSum ? { fixedSum } : {}),
+      total: grandTotal,
       status: "Not Paid",
       verificationRequired: true,
-      mode: body.mode || "E-Payment",
+      mode,
+      bank: mode !== "E-Payment" ? String(body.bank).slice(0, 100) : "",
+      instrument: mode === "Over the Counter" ? body.instrument : "",
+      expiresAt: new Date(Date.now() + 15 * 86400000).toISOString(),
       reason: body.reason || "Any other payment",
       challanType: body.challanType || "Self-assessment basis",
       financialYear:
@@ -861,7 +1470,9 @@ function mountPortal(app, deps) {
   });
   route("challan/otp", async (body, w, p, ctx) => {
     const c = w.challans.find((c) => c.id === body.id);
-    if (!c || c.status === "Paid") fail("Select an unpaid challan.");
+    challanRules.unpaid(c);
+    if (c.mode !== "E-Payment")
+      fail("Use challan history to complete an offline payment.");
     if (!body.bank || !body.terms) fail("Select a bank and accept the terms.");
     const otp = await getOtpService().issue({
       scope: otpScope(ctx, w, "challan-" + c.id),
@@ -877,8 +1488,9 @@ function mountPortal(app, deps) {
   });
   route("challan/pay", async (body, w, p, ctx) => {
     const challan = w.challans.find((c) => c.id === body.id);
-    if (!challan) fail("Challan not found.");
-    if (challan.status === "Paid") fail("This challan has already been paid.");
+    challanRules.unpaid(challan);
+    if (challan.mode !== "E-Payment")
+      fail("Use challan history to complete an offline payment.");
     if (!challan.bank || !challan.otp)
       fail("Confirm the bank payment and verify its OTP first.");
     await getOtpService().consume({
@@ -891,17 +1503,67 @@ function mountPortal(app, deps) {
     challan.cin = challan.cpin + "SBIN";
     challan.paidAt = stamp();
     w.cash = add(w.cash, challan.amounts);
+    challanRules.creditOtherHeads(w, challan);
     w.ledger.unshift({
       id: uid(),
       date: stamp(),
       type: "Cash deposit",
       period: w.period,
       credit: challan.amounts,
+      creditCategories: challan.deposits,
       reference: challan.cin,
     });
     return {
       challan,
       message: "Payment successful. Electronic cash ledger updated.",
+    };
+  });
+  route("challan/link-utr", (body, w) => {
+    const c = w.challans.find((c) => c.id === body.id);
+    challanRules.unpaid(c);
+    if (c.mode !== "NEFT / RTGS")
+      fail("UTR linking is available for NEFT / RTGS challans only.");
+    const utr = String(body.utr || "")
+      .trim()
+      .toUpperCase();
+    if (!/^[A-Z0-9]{16,22}$/.test(utr))
+      fail("Enter a valid 16–22 character UTR.");
+    if (
+      c.utr ||
+      w.challans.some((other) => other.id !== c.id && other.utr === utr)
+    )
+      fail("This challan or UTR is already linked.");
+    c.utr = utr;
+    c.status = "Awaiting bank confirmation";
+    return {
+      challan: c,
+      message: "UTR linked. Check payment status for bank confirmation.",
+    };
+  });
+  route("challan/check-status", (body, w) => {
+    const c = w.challans.find((c) => c.id === body.id);
+    challanRules.unpaid(c);
+    if (!["NEFT / RTGS", "Over the Counter"].includes(c.mode))
+      fail("Complete the online bank payment for this challan.");
+    if (c.mode === "NEFT / RTGS" && !c.utr)
+      fail("Link the UTR before checking the NEFT / RTGS payment status.");
+    c.status = "Paid";
+    c.cin = c.cpin + "BANK";
+    c.paidAt = stamp();
+    w.cash = add(w.cash, c.amounts);
+    challanRules.creditOtherHeads(w, c);
+    w.ledger.unshift({
+      id: uid(),
+      date: stamp(),
+      type: "Cash deposit",
+      period: c.period,
+      credit: c.amounts,
+      creditCategories: c.deposits,
+      reference: c.cin,
+    });
+    return {
+      challan: c,
+      message: "Bank confirmation received. Electronic cash ledger updated.",
     };
   });
   route("upload", (body, w, p, ctx) => {
@@ -918,7 +1580,7 @@ function mountPortal(app, deps) {
           input,
           w.period,
           ctx.active.state.taxpayer.state,
-          [...flow.returnData(w, p, "gstr1").invoices, ...accepted],
+          [...invoiceCandidates(w, p, input.section), ...accepted],
           w.filingFrequency === "QRMP" && flow.quarterInfo(w.period).isEnd
             ? flow.quarterInfo(w.period).periods
             : [w.period],
@@ -945,6 +1607,8 @@ function mountPortal(app, deps) {
       } catch (e) {
         errors.push({
           row: i + 1,
+          section: input.section,
+          gstin: input.gstin || "",
           number: input.number || "",
           error: e.message,
         });
@@ -1029,12 +1693,125 @@ function mountPortal(app, deps) {
     )
       fail("This supplier document already exists.");
     const i = p.purchases.findIndex((i) => i.id === row.id);
-    if (i >= 0) p.purchases[i] = row;
-    else p.purchases.push(row);
+    if (i >= 0) {
+      const prior = p.purchases[i];
+      row.importSource = prior.importSource;
+      const changed =
+        [
+          "gstin",
+          "number",
+          "date",
+          "taxable",
+          "invoiceValue",
+          "place",
+          "documentType",
+        ].some((key) => row[key] !== prior[key]) ||
+        JSON.stringify(row.taxes) !== JSON.stringify(prior.taxes);
+      if (!changed)
+        for (const key of [
+          "imsAction",
+          "imsRemark",
+          "imsActedAt",
+          "pendingThrough",
+          "itcReduction",
+        ])
+          if (prior[key] !== undefined) row[key] = prior[key];
+      p.purchases[i] = row;
+    } else p.purchases.push(row);
+    p.imsRevision = (p.imsRevision || 0) + 1;
     return {
       message: row.itcReason
         ? `Supplier document saved. ITC unavailable: ${row.itcReason}`
         : "Supplier document saved.",
+    };
+  });
+  const excelPreview = async (body, w, p, ctx) => {
+    const preview = await previewExcel(body, {
+      period: w.period,
+      taxpayer: ctx.active.state.taxpayer,
+      purchases: p.purchases,
+      invoices: yearInvoices(w),
+      masters: w.masters.parties,
+      asOf: ims.asOf(w),
+      annualReturns: w.annualReturns,
+      validateInvoice,
+    });
+    for (const row of preview.rows) {
+      try {
+        if (row.target === "sales") {
+          flow.assertWritable(w, p);
+          flow.assertIff(w, row.entry?.section);
+        } else if (
+          ["Offset", "Filed"].includes(p.gstr3b.status) ||
+          (w.filingFrequency === "QRMP" &&
+            ["Offset", "Filed"].includes(
+              w.periods[flow.quarterInfo(w.period).end]?.gstr3b.status,
+            ))
+        )
+          fail("Purchase data is locked after liability offset.");
+      } catch (error) {
+        row.error = error.message;
+      }
+    }
+    preview.canImport =
+      preview.canImport && preview.rows.every((row) => !row.error);
+    return preview;
+  };
+  route(
+    "excel/preview",
+    async (body, w, p, ctx) => ({
+      preview: publicPreview(await excelPreview(body, w, p, ctx)),
+    }),
+    { readOnly: true },
+  );
+  route("excel/import", async (body, w, p, ctx) => {
+    const preview = await excelPreview(body, w, p, ctx);
+    if (body.fingerprint !== preview.fingerprint)
+      fail("The workbook or return period changed. Preview it again.");
+    if (!preview.canImport)
+      fail(
+        "Correct all workbook errors before importing. No records were saved.",
+      );
+    if (preview.warningCount && body.reviewed !== true)
+      fail("Review and acknowledge the import warnings first.");
+    const purchases = preview.rows.filter((row) => row.target === "purchases");
+    const sales = preview.rows.filter((row) => row.target === "sales");
+    const metadata = (row) => ({
+      ...row.entry,
+      importSource: {
+        type: "Excel",
+        sheet: row.sheet,
+        row: row.row,
+        sourceRows: row.sourceRows,
+        warnings: row.warnings,
+      },
+    });
+    p.purchases.push(...purchases.map(metadata));
+    if (purchases.length) p.imsRevision = (p.imsRevision || 0) + 1;
+    p.invoices.push(...sales.map(metadata));
+    if (sales.length) {
+      p.gstr1.revision++;
+      p.gstr1.status = "In Progress";
+      delete p.gstr1.summary;
+    }
+    const upload = {
+      id: uid(),
+      name: String(body.name).slice(0, 100),
+      type:
+        purchases.length && sales.length
+          ? "Excel"
+          : purchases.length
+            ? "Purchases"
+            : "GSTR-1",
+      accepted: preview.rows.length,
+      errors: [],
+      status: "Processed",
+      at: stamp(),
+    };
+    p.uploads.unshift(upload);
+    return {
+      upload,
+      message: `${purchases.length} purchase documents and ${sales.length} outward documents imported.`,
     };
   });
   route("purchases/upload", (body, w, p, ctx) => {
@@ -1068,6 +1845,7 @@ function mountPortal(app, deps) {
       keys.add(key);
     });
     p.purchases.push(...incoming);
+    p.imsRevision = (p.imsRevision || 0) + 1;
     return { message: `${incoming.length} supplier documents loaded.` };
   });
   route("registration/new", (body, w) => {
@@ -1174,7 +1952,8 @@ function mountPortal(app, deps) {
     return { message: "Application opened." };
   });
   route("registration/save", (body, w, p, ctx) => {
-    body = { ...body, values: { ...body.values } };
+    body = { ...body, values: practiceDocuments.sanitize({ ...body.values }) };
+    practiceDocuments.validateCoordinates(body.values);
     if (["promoters", "signatory", "principal"].includes(body.tab)) {
       body.values.email ||= ctx.user.email;
       if (Array.isArray(body.values.records))
@@ -1184,11 +1963,19 @@ function mountPortal(app, deps) {
         }));
     }
     const r = w.registration;
-    if (body.tab === "principal") {
+    if (["principal", "additional"].includes(body.tab)) {
       if (body.values.state && body.values.state !== r.partA.state)
         fail("The principal place State / UT must match Part A.");
       body.values.state = r.partA.state;
       body.values.district ||= r.partA.district;
+      if (Array.isArray(body.values.records))
+        body.values.records = body.values.records.map((record) => {
+          if (record.state && record.state !== r.partA.state)
+            fail(
+              "Business addresses must be in the State / UT selected in Part A.",
+            );
+          return { ...record, state: r.partA.state };
+        });
     }
     if (!r.trn || r.stage !== "draft")
       fail("Verify the TRN OTP to open the draft application first.");
@@ -1208,6 +1995,26 @@ function mountPortal(app, deps) {
       fail("Complete the mandatory fields before saving this tab.");
     if (body.tab === "principal" && !/^\d{6}$/.test(body.values.pincode))
       fail("Enter a valid six-digit PIN code.");
+    if (body.tab === "business") {
+      if (
+        ["SEZ Unit", "SEZ Developer"].includes(body.values.reason) &&
+        (!body.values.sezLoaNumber ||
+          !flow.validDate(body.values.sezLoaDate) ||
+          !body.values.attachments?.sez)
+      )
+        fail(
+          "Enter the SEZ approval number and date, and attach the sample approval letter.",
+        );
+      if (
+        body.values.casual === "Yes" &&
+        (!flow.validDate(body.values.validFrom) ||
+          !flow.validDate(body.values.validTo) ||
+          body.values.validTo < body.values.validFrom ||
+          Date.parse(body.values.validTo) - Date.parse(body.values.validFrom) >=
+            90 * 86400000)
+      )
+        fail("Enter a casual-taxpayer validity period of up to 90 days.");
+    }
     const values =
       body.tab === "goods"
         ? hsnMaster.registrationValues(body.values)
@@ -1243,7 +2050,7 @@ function mountPortal(app, deps) {
     if (values.attachment)
       values.attachment = flow.attachment(values.attachment);
     if (JSON.stringify({ ...r.tabs, [body.tab]: values }).length > 6000000)
-      fail("Total application attachments must be smaller than 4 MB.");
+      fail("Application details are too large.");
     r.tabs[body.tab] = values;
     if (body.tab === "signatory" && r.tabs.aadhaar?.opted === "Yes") {
       try {
@@ -1512,7 +2319,7 @@ function mountPortal(app, deps) {
           : "IRN generated successfully.",
     };
   });
-  route("documents/update", (body, w) => {
+  route("documents/update", (body, w, p, ctx) => {
     const doc = w.documents[body.kind]?.find((d) => d.id === body.id);
     if (!doc) fail("Document not found.");
     if (doc.status === "Cancelled") fail("This document is cancelled.");
@@ -1578,7 +2385,16 @@ function mountPortal(app, deps) {
         fail("The e-way bill has expired. Vehicle update is unavailable.");
       doc.vehicle = body.vehicle;
     } else fail("Unknown document action.");
+    if (body.kind === "einvoice")
+      irp.sync(w, ctx.active.state.taxpayer, validateInvoice);
     return { message: "Document updated." };
+  });
+  extensions.mount({
+    route,
+    validateInvoice,
+    signingCheck,
+    paymentPlan,
+    hsnMaster,
   });
   app.get("/api/workspace/export", async (req, res) => {
     const user = await requireAuth(req, res);
