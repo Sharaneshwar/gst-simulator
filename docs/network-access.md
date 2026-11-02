@@ -1,37 +1,32 @@
-# Home network and administrator access
+# Home network and route-based access
 
-The portal permits the configured home public IP and valid administrator-unlock sessions. VPN IPs are not individually allowlisted. The ordinary portal account login is still required.
+The portal permits the configured home IPv4/IPv6 addresses or CIDR subnets and valid network-unlock sessions. VPN IPs are not individually allowlisted. The ordinary student/instructor account login is still required.
 
 ## Unlock from any network
 
-Open **`/admin`** on the same hostname and browser/profile used for the portal. Enter the private access password and select **Unlock Access**. This creates a 90-day session that remains valid across IP/VPN changes. Clearing site cookies or using another browser/profile requires entering the access password again. This is an access session, not physical-Mac identification.
+Open **`/godmode`** on the same hostname and browser/profile used for the portal. A normal GET visit automatically creates a 90-day network-access session and redirects to `/`. There is no password field or second submission. `/godmode/` also works. `/admin` no longer offers an unlock page.
 
-The route is deliberately not linked from the public blocked page or the app footer. Its password is the protection; knowing the route alone does not unlock the app. The password never appears in frontend code or a URL.
+This intentionally makes knowledge of the route sufficient to pass the network gate. Anyone who discovers or receives the URL can unlock their browser. The route is not a substitute for account authentication: invited users still log in normally, and existing roles/data permissions are retained. It is not linked from the blocked page or app footer, but it should not be treated as an undiscoverable secret.
 
-The old **Browser access** page, pending requests, private device-approval workflow, `__Host-gst_browser` credential, and device-based network grants have been removed. Legacy `network_devices` rows can remain for history, but grant no access.
+The cookie remains valid across IP/VPN changes. Clearing cookies or using a different browser/profile requires visiting the route again. Revisiting with a valid access session reuses it without extending its original expiry. This is browser access, not physical-Mac identification.
 
-## Private configuration
+## Private gateway and configuration
 
-Keep matching `NETWORK_GATEWAY_SECRET` values on Vercel and Render; keep `NETWORK_ACCESS_ENABLED=1`, the home IP allowlist in `NETWORK_HOME_IPS`, and the existing `GST_API_ORIGIN`, `VITE_NETWORK_ACCESS` and `VITE_API_BASE` settings.
+Keep matching `NETWORK_GATEWAY_SECRET` values on Vercel and Render; retain `NETWORK_ACCESS_ENABLED=1`, matching `NETWORK_HOME_IPS`, and the existing `GST_API_ORIGIN`, `VITE_NETWORK_ACCESS` and `VITE_API_BASE` settings. Exact IPs and CIDR ranges are supported; for example, `49.36.43.0/24` permits every address from `.0` through `.255`, including other subscribers using that range.
 
-Configure the access password using the private database operator tool from `backend`:
+Only the server-side Vercel middleware calls Render's `/api/network/route-unlock` operation, carrying the private gateway credential and platform-provided client IP. The credential is never sent to the browser. The public `/api/network?action=...` function does not expose `route-unlock` as a selectable action. Direct requests without the gateway credential are blocked.
 
-```sh
-# Supply the new password through stdin, without putting it into a URL or source code.
-node scripts/network-admin.js set-password
-```
+HEAD requests and prefetch probes do not issue sessions; unsupported methods return 405. Missing gateway configuration or unavailable/rejecting backends return 503 without an access cookie. New sessions are limited to five per public IP and 100 globally per 15 minutes, with counters persisted in Neon. Existing valid sessions can still reuse the route after the new-session limit is reached.
 
-Input is read until EOF; the tool stores a salted scrypt hash in Neon `network_access_settings`. Do not commit passwords or private `.env` files. An optional `NETWORK_ADMIN_PASSWORD_HASH` backend environment variable overrides the database value for isolated tests or managed configuration. No extra Vercel secret is needed.
+Successful unlock creates a random 256-bit `Secure`, `HttpOnly`, `SameSite=Strict`, host-only cookie; only its hash is stored in `network_access_sessions`. Cookie responses and redirects use private no-store caching and no-referrer headers. API grants last 60 seconds, and expiration/revocation are checked on each request. Student passwords/data are not changed by network unlock.
 
-Attempts are limited to five per public IP per 15 minutes, plus 100 across all IPs per 15 minutes. Counters live in Neon, so restarting Render does not reset them. A missing password configuration fails closed. Only the trusted same-origin gateway can call the backend unlock route; cross-origin unlock requests are rejected before any credential is issued.
+The existing password-validated backend operation remains for compatibility with operator tooling, but the removed `/admin` form is no longer used. Its configured password is not needed by `/godmode`.
 
-Successful unlock creates a random 256-bit `Secure`, `HttpOnly`, `SameSite=Strict`, host-only cookie; only its token hash is stored in `network_access_sessions`. API grants last 60 seconds; revocation and expiration are checked on each request. Unlocking again replaces the existing session in that browser. Site passwords and student data are not changed by network unlock.
-
-List or revoke a session privately:
+List or revoke a session privately from `backend`:
 
 ```sh
 node scripts/network-admin.js list
 node scripts/network-admin.js revoke <session-id>
 ```
 
-Render's health endpoint remains public for UptimeRobot. Other outsiders continue to receive the generic 403 blocked page. Only `/admin` and the protected network API entry point are reachable before network authorization. The admin page has a nonce-based Content Security Policy and no-store caching.
+Render's health endpoint stays public for UptimeRobot. Outsiders without a matching network or access cookie still receive the generic blocked page when visiting ordinary app URLs. The old `__Host-gst_browser` device-approval credential and legacy device grants remain unsupported.

@@ -49,37 +49,22 @@ const page = (ip, cookie = "", path = "/") =>
   middleware(
     new Request(edgeUrl + path, { headers: { "x-real-ip": ip, cookie } }),
   );
-test("outsiders remain blocked except the password-protected admin page", async () => {
-  for (const path of ["/", "/assets/app.js", "/admin/anything"])
-    assert.equal((await page("203.0.113.2", "", path)).status, 403);
-  const denied = await page("203.0.113.2");
-  const html = await denied.text();
+test("outsiders stay blocked and the old admin route no longer provides an unlock form", async () => {
+  for (const path of [
+    "/",
+    "/assets/app.js",
+    "/admin",
+    "/admin/",
+    "/admin/anything",
+    "/godmode/anything",
+  ])
+    assert.equal((await page("203.0.113.2", "", path)).status, 403, path);
+  const html = await (await page("203.0.113.2")).text();
   assert.match(html, /Sorry, you have been blocked/);
-  assert.doesNotMatch(html, /\/admin|Browser access|<script|<input/);
+  assert.doesNotMatch(html, /\/godmode|\/admin|Browser access|<script|<input/);
   assert.equal(
     (await page("203.0.113.10")).headers.get("x-middleware-next"),
     "1",
-  );
-  const admin = await page("203.0.113.2", "", "/admin");
-  assert.equal(admin.status, 200);
-  const form = await admin.text();
-  assert.match(form, /Administrator access/);
-  assert.match(form, /type="password"/);
-  assert.doesNotMatch(form, /test-only-admin|scrypt\$|NETWORK_GATEWAY_SECRET/);
-  assert.match(admin.headers.get("cache-control"), /no-store/);
-  assert.match(
-    admin.headers.get("content-security-policy"),
-    /script-src 'nonce-/,
-  );
-  const adminAgain = await page("203.0.113.2", "", "/admin");
-  assert.notEqual(
-    admin.headers.get("content-security-policy"),
-    adminAgain.headers.get("content-security-policy"),
-  );
-  assert.equal(
-    (await middleware(new Request(edgeUrl + "/admin", { method: "POST" })))
-      .status,
-    405,
   );
   assert.equal(
     (await page("203.0.113.2", "", "/api/network?action=unlock")).headers.get(
@@ -88,6 +73,106 @@ test("outsiders remain blocked except the password-protected admin page", async 
     "1",
   );
 });
+test("visiting godmode issues a secure 90-day cookie without password input and redirects to the portal", async () => {
+  const result = await page("192.0.2.12", "", "/godmode");
+  assert.equal(result.status, 303);
+  assert.equal(result.headers.get("location"), "/");
+  assert.match(result.headers.get("cache-control"), /no-store/);
+  assert.equal(await result.text(), "");
+  const setCookie = result.headers.get("set-cookie");
+  assert.match(
+    setCookie,
+    /^__Host-gst_access=[A-Za-z0-9_-]{43}; Path=\/; Max-Age=7776000; HttpOnly; Secure; SameSite=Strict$/,
+  );
+  const entryCookie = setCookie.split(";")[0];
+  assert.equal(
+    (await page("198.51.100.55", entryCookie)).headers.get("x-middleware-next"),
+    "1",
+  );
+  assert.equal((await page("198.51.100.55")).status, 403);
+  const session = await fetch(edgeUrl + "/api/network?action=session", {
+    headers: { "x-real-ip": "198.51.100.56", cookie: entryCookie },
+  });
+  const data = await session.json();
+  assert.equal(data.allowed, true);
+  assert.equal(data.status, "unlocked");
+  assert.equal(await service.verifyGrant(data.grant), true);
+  const again = await page("198.51.100.56", entryCookie, "/godmode/");
+  assert.equal(again.status, 303);
+  assert.equal(again.headers.get("set-cookie"), null);
+  const row = await db
+    .prepare("SELECT * FROM network_access_sessions WHERE token_hash=?")
+    .get(require("../network-access").hash(entryCookie.split("=")[1]));
+  assert.ok(row);
+  assert.equal(Number(row.expires_at) - Number(row.created_at), 90 * 86400000);
+});
+test("HEAD, prefetch and unsupported godmode requests cannot create sessions", async () => {
+  const count = async () =>
+    Number(
+      (
+        await db
+          .prepare("SELECT COUNT(*) AS count FROM network_access_sessions")
+          .get()
+      ).count,
+    );
+  const before = await count();
+  for (const options of [
+    { method: "HEAD" },
+    { method: "GET", headers: { purpose: "prefetch" } },
+    { method: "GET", headers: { "sec-purpose": "prefetch;prerender" } },
+    { method: "POST" },
+  ]) {
+    const result = await middleware(
+      new Request(edgeUrl + "/godmode", {
+        ...options,
+        headers: { "x-real-ip": "192.0.2.14", ...options.headers },
+      }),
+    );
+    assert.equal(result.status, options.method === "POST" ? 405 : 204);
+    assert.equal(result.headers.get("set-cookie"), null);
+  }
+  assert.equal(await count(), before);
+});
+test("godmode fails closed when gateway settings or backend availability are missing", async () => {
+  const origin = process.env.GST_API_ORIGIN,
+    key = process.env.NETWORK_GATEWAY_SECRET;
+  try {
+    process.env.NETWORK_GATEWAY_SECRET = "";
+    assert.equal((await page("192.0.2.14", "", "/godmode")).status, 503);
+    process.env.NETWORK_GATEWAY_SECRET = key;
+    process.env.GST_API_ORIGIN = "http://127.0.0.1:1";
+    const result = await page("192.0.2.14", "", "/godmode");
+    assert.equal(result.status, 503);
+    assert.equal(result.headers.get("set-cookie"), null);
+    assert.equal(result.headers.get("location"), null);
+  } finally {
+    process.env.GST_API_ORIGIN = origin;
+    process.env.NETWORK_GATEWAY_SECRET = key;
+  }
+});
+test("route unlock requires the private gateway and is throttled without affecting existing sessions", async () => {
+  const direct = await fetch(backendUrl + "/api/network/route-unlock", {
+    method: "POST",
+    headers: { "x-gst-client-ip": "192.0.2.15" },
+  });
+  assert.equal(direct.status, 403);
+  const publicAction = await fetch(
+    edgeUrl + "/api/network?action=route-unlock",
+    { method: "POST", headers: { "x-real-ip": "192.0.2.15" } },
+  );
+  assert.equal(publicAction.status, 403);
+  const first = await page("192.0.2.15", "", "/godmode");
+  assert.equal(first.status, 303);
+  const entryCookie = first.headers.get("set-cookie").split(";")[0];
+  for (let i = 0; i < 4; i++)
+    assert.equal((await page("192.0.2.15", "", "/godmode")).status, 303);
+  const limited = await page("192.0.2.15", "", "/godmode");
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get("retry-after")) > 0);
+  assert.equal(limited.headers.get("set-cookie"), null);
+  assert.equal((await page("192.0.2.15", entryCookie, "/godmode")).status, 303);
+});
+
 let cookie;
 test("unlock checks the password, rejects cross-site posts, and forwards a secure cookie", async () => {
   const opts = (password) => ({

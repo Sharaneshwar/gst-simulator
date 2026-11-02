@@ -140,6 +140,34 @@ function createNetworkAccess({ db, env = process.env, now = Date.now }) {
       return 0;
     })();
   }
+  async function issueSession(req, res) {
+    const token = crypto.randomBytes(32).toString("base64url"),
+      id = crypto.randomUUID(),
+      ip = clientIp(req);
+    await db.transaction(async () => {
+      const previous = await accessSession(req);
+      if (previous && !previous.revoked_at)
+        await db
+          .prepare(
+            "UPDATE network_access_sessions SET revoked_at = ? WHERE id = ?",
+          )
+          .run(now(), previous.id);
+      await db
+        .prepare(
+          "INSERT INTO network_access_sessions (id,token_hash,created_at,expires_at,requested_ip) VALUES (?,?,?,?,?)",
+        )
+        .run(id, hash(token), now(), now() + LIFETIME, ip);
+    })();
+    res.setHeader(
+      "Set-Cookie",
+      `${COOKIE}=${token}; Path=/; Max-Age=${LIFETIME / 1000}; HttpOnly; Secure; SameSite=Strict`,
+    );
+    res.json({
+      allowed: true,
+      status: "unlocked",
+      message: "Access unlocked. You can now open the portal.",
+    });
+  }
   function mount(app) {
     app.use("/api/network", (req, res, next) => {
       res.setHeader("Cache-Control", "no-store, private");
@@ -175,6 +203,30 @@ function createNetworkAccess({ db, env = process.env, now = Date.now }) {
     };
     app.post("/api/network/check", (req, res) => session(req, res, false));
     app.get("/api/network/session", (req, res) => session(req, res, true));
+    // This trusted gateway operation intentionally uses knowledge of /godmode
+    // as the entry condition. Ordinary portal authentication remains separate.
+    app.post("/api/network/route-unlock", async (req, res, next) => {
+      try {
+        if (!enabled())
+          return res
+            .status(503)
+            .json({ message: "Network access is not enabled." });
+        if (active(await accessSession(req)))
+          return res.json({ allowed: true, status: "unlocked" });
+        const retry = await unlockAttempt(clientIp(req));
+        if (retry) {
+          res.setHeader("Retry-After", retry);
+          return res
+            .status(429)
+            .json({
+              message: "Too many attempts. Please try again in 15 minutes.",
+            });
+        }
+        await issueSession(req, res);
+      } catch (error) {
+        next(error);
+      }
+    });
     app.post("/api/network/unlock", async (req, res, next) => {
       try {
         const stored =
@@ -204,32 +256,7 @@ function createNetworkAccess({ db, env = process.env, now = Date.now }) {
           return res
             .status(401)
             .json({ message: "The administrator password is incorrect." });
-        const token = crypto.randomBytes(32).toString("base64url"),
-          id = crypto.randomUUID(),
-          ip = clientIp(req);
-        await db.transaction(async () => {
-          const previous = await accessSession(req);
-          if (previous && !previous.revoked_at)
-            await db
-              .prepare(
-                "UPDATE network_access_sessions SET revoked_at = ? WHERE id = ?",
-              )
-              .run(now(), previous.id);
-          await db
-            .prepare(
-              "INSERT INTO network_access_sessions (id,token_hash,created_at,expires_at,requested_ip) VALUES (?,?,?,?,?)",
-            )
-            .run(id, hash(token), now(), now() + LIFETIME, ip);
-        })();
-        res.setHeader(
-          "Set-Cookie",
-          `${COOKIE}=${token}; Path=/; Max-Age=${LIFETIME / 1000}; HttpOnly; Secure; SameSite=Strict`,
-        );
-        res.json({
-          allowed: true,
-          status: "unlocked",
-          message: "Access unlocked. You can now open the portal.",
-        });
+        await issueSession(req, res);
       } catch (error) {
         next(error);
       }

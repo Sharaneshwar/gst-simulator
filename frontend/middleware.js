@@ -1,22 +1,12 @@
 import { matchesIpAllowlist } from "./network/ip-allowlist.js";
-import { randomBytes } from "node:crypto";
-import { adminPage, adminHeaders } from "./network/admin-page.js";
+import { unlockRoute } from "./network/route-unlock.js";
 import { next, ipAddress } from "@vercel/functions";
 import { blockedPage, blockedHeaders } from "./network/blocked-page.js";
 export const config = { runtime: "nodejs" };
 export default async function middleware(request) {
   const url = new URL(request.url);
-  if (url.pathname === "/admin" || url.pathname === "/admin/") {
-    if (request.method !== "GET" && request.method !== "HEAD")
-      return new Response(null, {
-        status: 405,
-        headers: { Allow: "GET, HEAD" },
-      });
-    const nonce = randomBytes(16).toString("base64");
-    return new Response(request.method === "HEAD" ? null : adminPage(nonce), {
-      headers: adminHeaders(nonce),
-    });
-  }
+  if (url.pathname === "/godmode" || url.pathname === "/godmode/")
+    return unlockRoute(request);
   if (process.env.NETWORK_ACCESS_ENABLED !== "1") return next();
   if (url.pathname === "/api/network") return next();
   const ip = ipAddress(request);
