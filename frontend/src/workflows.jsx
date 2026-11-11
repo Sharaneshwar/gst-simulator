@@ -76,12 +76,20 @@ export function OfflineReturn({ type = "GSTR-1" }) {
             : "Upload GSTR-1 utility JSON or invoice-template JSON. Review the processed records and error report before filing."}
         </p>
         {locked && (
-          <p className="info" id="offline-upload-requirement" role="status">
-            {type} is locked because it has been{" "}
-            {three && p.gstr3b.status === "Offset" ? "offset" : "filed"}.
-            Uploads cannot change this return. Select another return period to
-            enter new records.
-          </p>
+          <div className="info" id="offline-upload-requirement" role="status">
+            <p>
+              {type} is locked because it has been{" "}
+              {three && p.gstr3b.status === "Offset" ? "offset" : "filed"}.
+              {three
+                ? " Uploads cannot change this return. Select another return period to enter new records."
+                : " Sales uploads cannot change this filed return. Use Supplier Return Data for purchase uploads."}
+            </p>
+            {!three && (
+              <Btn tone="secondary" onClick={() => go("supplier-data")}>
+                UPLOAD PURCHASE DATA
+              </Btn>
+            )}
+          </div>
         )}
         {!locked && !file && (
           <p className="muted" id="offline-upload-requirement">
@@ -215,6 +223,7 @@ export function SupplierStatement({ type }) {
       </h1>
       <TaxpayerBar />
       <div className="actions">
+        <Btn onClick={() => go("supplier-data")}>UPLOAD PURCHASE DATA</Btn>
         <Btn tone="secondary" onClick={() => go("ims")}>
           OPEN IMS DASHBOARD
         </Btn>
@@ -430,7 +439,7 @@ export function PurchaseData() {
     });
   return (
     <div className="container">
-      <Crumbs items={[["Downloads", "downloads"], "Supplier Return Data"]} />
+      <Crumbs items={[["Returns", "returns"], "Supplier Return Data"]} />
       <h1>Supplier Return Data</h1>
       <TaxpayerBar />
       <Panel title="Load inward supply documents">

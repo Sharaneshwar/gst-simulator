@@ -370,6 +370,11 @@ export function Dashboard() {
       </div>
       <TaxpayerBar />
       <Panel title="Dashboard">
+        <div className="actions">
+          <Btn onClick={() => go("supplier-data")}>
+            UPLOAD PURCHASE DATA (EXCEL / JSON)
+          </Btn>
+        </div>
         <div className="dashboard-actions">
           {[
             ["▤", "FILE RETURNS", "returns"],

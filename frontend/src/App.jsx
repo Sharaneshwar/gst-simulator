@@ -69,6 +69,7 @@ function Shell({ children, ctx }) {
     ? [
         ["Registration", "registration"],
         ["Returns", "returns"],
+        ["Purchase / Supplier Data", "supplier-data"],
         ["Invoice Management System (IMS)", "ims"],
         ["My Masters", "masters"],
         ["File GST PMT-09", "pmt09"],
@@ -93,7 +94,6 @@ function Shell({ children, ctx }) {
       "Downloads",
       [
         ["Returns Offline Utility", "downloads"],
-        ["Supplier Return Data", "supplier-data"],
         ["GSTR-1 JSON Template", "downloads"],
         ["User Manuals", "help"],
       ],

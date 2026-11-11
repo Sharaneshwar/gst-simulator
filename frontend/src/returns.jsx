@@ -65,6 +65,7 @@ export function ReturnsDashboard() {
   );
   const isIff = w.returnInfo?.isIff,
     qrmp = w.filingFrequency === "QRMP";
+  const selectedPeriod = `${month < 4 ? year + 1 : year}-${String(month).padStart(2, "0")}`;
   const tiles = [
     [
       "Details of outward supplies of goods or services",
@@ -165,6 +166,16 @@ export function ReturnsDashboard() {
             }}
           >
             SEARCH
+          </Btn>
+          <Btn
+            tone="secondary"
+            onClick={async () => {
+              if (w.period !== selectedPeriod)
+                await mutate("period", { period: selectedPeriod });
+              go("supplier-data");
+            }}
+          >
+            UPLOAD PURCHASE DATA
           </Btn>
         </div>
       </Panel>
