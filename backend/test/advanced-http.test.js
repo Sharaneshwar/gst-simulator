@@ -406,3 +406,70 @@ test("negative 3B values persist, and calculated late fee is funded through the 
   assert.equal(fee.calculation.latefee.cgst, 100);
   assert.equal(fee.state.workspace.paymentPlan.minorShortfall.fee.cgst, 100);
 });
+
+test("calendar changes invalidate applied interest/fees and master/draft deletion completes without affecting cash", async () => {
+  assert.equal(
+    (await act("returns/preferences", { dueDate: "2026-12-01" })).code,
+    400,
+  );
+  assert.equal(
+    (
+      await req(
+        "/workspace/returns/preferences",
+        { dueDate: "bad" },
+        instructor,
+      )
+    ).code,
+    400,
+  );
+  const applied = await act("fees/calculate", {
+    filingDate: "2026-11-25",
+    turnover: 1000000,
+    apply: true,
+  });
+  assert.equal(applied.code, 200, applied.message);
+  assert.equal(applied.state.workspace.chargesStale, false);
+  await act("calendar/date", { date: "2026-11-26" });
+  const changed = await act("gstr3b/save");
+  assert.equal(changed.state.workspace.chargesStale, true);
+  const refreshed = await act("fees/calculate", {
+    filingDate: "2026-11-26",
+    turnover: 1000000,
+    apply: true,
+  });
+  assert.equal(refreshed.state.workspace.chargesStale, false);
+  const product = await act("masters/save", {
+    kind: "products",
+    record: { name: "Paper", hsn: "4802", uqc: "NOS", rate: 18 },
+  });
+  const record = product.state.workspace.masters.products[0];
+  assert.equal(
+    (await act("masters/delete", { kind: "products", id: record.id })).code,
+    200,
+  );
+  assert.equal(
+    (await act("masters/delete", { kind: "products", id: record.id })).code,
+    400,
+  );
+  await deposit({ igst: 100 });
+  const beforeCash = (await req("/portal")).activeCase.state.workspace.cash;
+  await act("pmt09/save", {
+    rows: [
+      {
+        fromHead: "igst",
+        fromCategory: "tax",
+        toHead: "cgst",
+        toCategory: "tax",
+        amount: 25,
+      },
+    ],
+  });
+  const cleared = await act("pmt09/clear");
+  assert.equal(cleared.state.workspace.pmt09Draft, undefined);
+  assert.deepEqual(cleared.state.workspace.cash, beforeCash);
+  assert.equal(
+    (await act("challan/fixed-sum")).code,
+    400,
+    "missing prior filed basis is explained",
+  );
+});

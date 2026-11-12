@@ -78,6 +78,116 @@ function workingDate(w) {
         .slice(0, 10)
     : today;
 }
+function workingInstant(w) {
+  return `${workingDate(w)}T${w.documentTimes?.[w.period] || "12:00"}:00+05:30`;
+}
+function extendValidity(doc, input, now, actorGstin) {
+  if (doc.status !== "Active" || !doc.validUntil)
+    fail("Only an active e-way bill with completed Part B can be extended.");
+  if (doc.transporterId && doc.transporterId !== actorGstin)
+    fail("Only the current transporter can extend this e-way bill.");
+  const instant = Date.parse(now),
+    end = Date.parse(doc.validUntil);
+  if (
+    !Number.isFinite(instant) ||
+    !Number.isFinite(end) ||
+    Math.abs(instant - end) > 8 * 3600000
+  )
+    fail(
+      "Extend validity within eight hours before or after the existing expiry time.",
+    );
+  if (
+    ![
+      "Natural Calamity",
+      "Law and Order",
+      "Accident",
+      "Transshipment",
+      "Others",
+    ].includes(input.reason) ||
+    !String(input.remarks || "").trim()
+  )
+    fail("Select an extension reason and enter remarks.");
+  const remainingDistance = Number(input.remainingDistance);
+  if (
+    !Number.isFinite(remainingDistance) ||
+    remainingDistance <= 0 ||
+    remainingDistance > 4000
+  )
+    fail("Enter a remaining distance greater than zero and up to 4,000 KM.");
+  if (!["In Movement", "In Transit"].includes(input.consignmentStatus))
+    fail("Select In Movement or In Transit for the consignment.");
+  if (
+    !String(input.currentPlace || "").trim() ||
+    !/^\d{6}$/.test(input.currentPincode || "") ||
+    !input.currentState
+  )
+    fail("Enter the current place, six-digit PIN code and state.");
+  if (
+    input.consignmentStatus === "In Transit" &&
+    !["On Road", "Warehouse", "Others"].includes(input.transitType)
+  )
+    fail("Select the consignment's transit type.");
+  const mode = input.mode || doc.mode;
+  if (!["Road", "Rail", "Air", "Ship"].includes(mode))
+    fail("Select a valid mode of transport.");
+  const vehicle = String(input.vehicle || "")
+    .replace(/\s/g, "")
+    .toUpperCase();
+  const transportDocument = String(input.transportDocument || "");
+  if (
+    (mode === "Road" ||
+      (mode === "Ship" && doc.vehicleType === "Over Dimensional Cargo")) &&
+    !vehicleValid(vehicle)
+  )
+    fail("Enter a valid vehicle number.");
+  if (
+    ["Rail", "Air", "Ship"].includes(mode) &&
+    !/^[A-Za-z0-9/-]{1,15}$/.test(transportDocument)
+  )
+    fail("Enter a valid transport document number.");
+  if (mode === "Rail" && !/^[PFL][A-Z0-9/-]{2,14}$/.test(transportDocument))
+    fail("Railway document number must start with P, F or L.");
+  const date = now.slice(0, 10);
+  if (
+    input.transportDate &&
+    (!/^\d{4}-\d{2}-\d{2}$/.test(input.transportDate) ||
+      Number.isNaN(Date.parse(input.transportDate)) ||
+      new Date(input.transportDate).toISOString().slice(0, 10) !==
+        input.transportDate ||
+      input.transportDate > date)
+  )
+    fail(
+      "Enter a valid transport document date on or before the working date.",
+    );
+  const extended = expiry(date, remainingDistance, doc.vehicleType);
+  const issuedDate =
+    doc.referenceDate ||
+    doc.issuedAt?.slice(0, 10) ||
+    doc.createdAt.slice(0, 10);
+  const limit = Date.parse(`${issuedDate}T00:00:00+05:30`) + 361 * 86400000 - 1;
+  if (Date.parse(extended) > limit)
+    fail("Validity cannot extend beyond 360 days from generation.");
+  if (Date.parse(extended) <= end)
+    fail("The extension must increase the existing validity.");
+  return {
+    at: now,
+    previousValidUntil: doc.validUntil,
+    validUntil: extended,
+    remainingDistance,
+    reason: input.reason,
+    remarks: String(input.remarks).trim().slice(0, 500),
+    consignmentStatus: input.consignmentStatus,
+    transitType:
+      input.consignmentStatus === "In Transit" ? input.transitType : "",
+    currentPlace: String(input.currentPlace).trim().slice(0, 200),
+    currentPincode: input.currentPincode,
+    currentState: input.currentState,
+    mode,
+    vehicle,
+    transportDocument,
+    transportDate: input.transportDate || "",
+  };
+}
 function expiry(date, distance, vehicleType) {
   const days = Math.max(
     1,
@@ -220,6 +330,8 @@ module.exports = {
   MAPPING,
   vehicleValid,
   workingDate,
+  workingInstant,
+  extendValidity,
   expiry,
   validate,
 };

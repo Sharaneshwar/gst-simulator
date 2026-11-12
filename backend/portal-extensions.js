@@ -207,6 +207,20 @@ function processingGuard(p) {
       "Correct or delete the errored records before generating or filing the statement.",
     );
 }
+function chargeBinding(w, p, plan) {
+  return JSON.stringify({
+    period: w.period,
+    frequency: w.filingFrequency,
+    asOf: ims.asOf(w),
+    override: w.dueDateOverrides?.[w.period],
+    waiver: w.lateFeeWaivers?.[w.period] === true,
+    interestWaiver: w.interestWaivers?.[w.period] === true,
+    cashLiability: plan.taxCashUsed || plan.cashUsed,
+    nil:
+      !!p.gstr3b.nil ||
+      H.every((h) => Number((plan.taxLiability || plan.liability)[h]) <= 0),
+  });
+}
 function projection(w) {
   init(w);
   w.ecoOptions = eco.BUCKETS;
@@ -219,6 +233,12 @@ function projection(w) {
   w.gstr2bStale =
     !!w.periods[w.period].gstr2b &&
     w.periods[w.period].gstr2b.sourceRevision !== ims.revision(w);
+  w.gstr2bRefreshBlocked = ims.recomputeBlocker(w);
+  w.gstr2bReviewCount = ims
+    .pool(w)
+    .filter(
+      (row) => ims.included(row, w.period) && row.match === "Requires Review",
+    ).length;
   w.portalDate = ims.asOf(w);
   w.cashBalances = balances(w);
 }
@@ -685,6 +705,7 @@ function mount({
         latefee: { taxes: calculation.latefee },
       });
       p.gstr3b.charges = calculation;
+      p.gstr3b.chargesBinding = chargeBinding(w, p, plan);
       p.gstr3b.saved = false;
       w.taxProfile = { ...w.taxProfile, turnover: calculation.turnover };
     }
@@ -713,4 +734,5 @@ module.exports = {
   processJobs,
   processingGuard,
   master,
+  chargeBinding,
 };

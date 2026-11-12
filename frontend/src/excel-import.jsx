@@ -82,6 +82,9 @@ export function ExcelImport({ target = "sales" }) {
         <div className="info" role="status">
           <b>Import complete.</b> {receipt.purchases} purchase documents and{" "}
           {receipt.sales} outward documents saved.
+          {receipt.statementRefresh && (
+            <p>{receipt.statementRefresh.message}</p>
+          )}
           <div className="actions">
             {!!receipt.purchases && (
               <Btn tone="secondary" onClick={() => go("supplier-data")}>
@@ -275,7 +278,7 @@ export function ExcelImport({ target = "sales" }) {
                 (!!preview.warningCount && !reviewed)
               }
               onClick={async () => {
-                await mutate("excel/import", {
+                const result = await mutate("excel/import", {
                   ...payload,
                   fingerprint: preview.fingerprint,
                   reviewed,
@@ -288,7 +291,10 @@ export function ExcelImport({ target = "sales" }) {
                     .length,
                 };
                 reset(null);
-                setReceipt(counts);
+                setReceipt({
+                  ...counts,
+                  statementRefresh: result.statementRefresh,
+                });
                 setFileKey((old) => old + 1);
               }}
             >

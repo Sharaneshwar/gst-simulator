@@ -83,4 +83,26 @@ function authenticationValues(registration, values) {
   return { ...values, person: person.value, personName: person.label };
 }
 
-module.exports = { signatories, resolveSignatory, authenticationValues };
+function signingOptions(w, taxpayer, purpose) {
+  const registration = purpose === "registration-submit";
+  const people = registration
+    ? signatories(w.registration)
+    : taxpayer.signatories ||
+      (["Pending for Validation", "Approved"].includes(w.registration?.stage)
+        ? signatories(w.registration)
+        : []);
+  const constitution = registration
+    ? w.registration?.tabs?.business?.constitution
+    : taxpayer.constitution ||
+      (["Pending for Validation", "Approved"].includes(w.registration?.stage)
+        ? w.registration?.tabs?.business?.constitution
+        : "");
+  const dsc = /company|limited liability partnership/i.test(constitution || "");
+  return { people, methods: dsc ? ["DSC"] : ["EVC", "DSC"] };
+}
+module.exports = {
+  signatories,
+  resolveSignatory,
+  authenticationValues,
+  signingOptions,
+};

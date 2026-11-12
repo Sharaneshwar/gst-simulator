@@ -718,3 +718,57 @@ test("Table 15A POS replacement zeros the original and adds a separate new POS w
     /first save zero/,
   );
 });
+
+test("automatic inward refresh replaces stale snapshots and ITC overrides without accepting review records", () => {
+  const w = workspace(),
+    p = w.periods[w.period];
+  ims.recompute(w);
+  p.gstr3b.tables["4"] = { taxes: heads(999) };
+  p.gstr3b.tables["4b"] = { taxes: heads(99) };
+  p.gstr3b.tables["3.1"] = { taxes: heads(90) };
+  p.gstr3b.saved = true;
+  p.purchases.push(
+    purchase("ok"),
+    purchase("review", { number: "PUR/2", match: "Requires Review" }),
+  );
+  p.imsRevision++;
+  const result = ims.refreshAfterChange(w);
+  assert.equal(result.refreshed, true);
+  assert.equal(result.reviewCount, 1);
+  assert.equal(p.gstr2b.records.length, 2);
+  assert.equal(p.gstr2b.sourceRevision, ims.revision(w));
+  assert.equal(p.gstr3b.saved, false);
+  assert.equal(p.gstr3b.tables["4"], undefined);
+  assert.equal(p.gstr3b.tables["4b"], undefined);
+  assert.equal(p.gstr3b.tables["3.1"].taxes.igst, 90);
+  assert.equal(
+    flow.draft3b(flow.returnData(w, p), "Maharashtra")["4"].taxes.igst,
+    180,
+  );
+});
+test("automatic refresh explains date/quarter/offset blockers without losing uploaded documents or snapshots", () => {
+  for (const setup of [
+    (w) => {
+      w.returnAsOf = "2026-11-13";
+    },
+    (w) => {
+      w.filingFrequency = "QRMP";
+    },
+    (w) => {
+      w.periods[w.period].gstr3b.status = "Offset";
+    },
+  ]) {
+    const w = workspace(),
+      p = w.periods[w.period];
+    ims.recompute(w);
+    const snapshot = structuredClone(p.gstr2b);
+    p.purchases.push(purchase());
+    p.imsRevision++;
+    setup(w);
+    const result = ims.refreshAfterChange(w);
+    assert.equal(result.refreshed, false);
+    assert.match(result.message, /refresh pending/);
+    assert.equal(p.purchases.length, 1);
+    assert.deepEqual(p.gstr2b, snapshot);
+  }
+});

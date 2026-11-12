@@ -166,15 +166,21 @@ function act(w, body) {
     message: `${selected.length} IMS record(s) updated. Recompute GSTR-2B to update the ITC statement.`,
   };
 }
-function recompute(w) {
+function recomputeBlocker(w) {
   const p = w.periods[w.period];
   if (["Offset", "Filed"].includes(p.gstr3b.status))
-    fail("GSTR-2B cannot be recomputed after liability offset.");
+    return "GSTR-2B cannot be recomputed after liability offset.";
   if (w.filingFrequency === "QRMP" && Number(w.period.slice(5, 7)) % 3 !== 0)
-    fail("Quarterly GSTR-2B is computed at quarter end.");
+    return "Quarterly GSTR-2B is computed at quarter end.";
   const availability = `${next(w.period)}-14`;
   if (asOf(w) < availability)
-    fail(`GSTR-2B computation is available from ${availability}.`);
+    return `GSTR-2B computation is available from ${availability}.`;
+  return null;
+}
+function recompute(w) {
+  const p = w.periods[w.period];
+  const blocker = recomputeBlocker(w);
+  if (blocker) fail(blocker);
   const records = pool(w)
     .filter((row) => included(row, w.period))
     .map((row) => ({
@@ -197,6 +203,32 @@ function recompute(w) {
   return {
     message:
       "GSTR-2B recomputed. Review the updated ITC before saving GSTR-3B.",
+  };
+}
+// Refresh only after a committed inward-data action, never during a preview or read.
+function refreshAfterChange(w) {
+  const p = w.periods[w.period];
+  const blocker = recomputeBlocker(w);
+  if (blocker) {
+    if (!["Offset", "Filed"].includes(p.gstr3b.status)) p.gstr3b.saved = false;
+    return {
+      refreshed: false,
+      message: `GSTR-2B refresh pending: ${blocker}`,
+    };
+  }
+  recompute(w);
+  const reviewCount = p.gstr2b.records.filter(
+    (row) => row.match === "Requires Review",
+  ).length;
+  return {
+    refreshed: true,
+    reviewCount,
+    message:
+      "GSTR-2B and draft GSTR-3B ITC refreshed automatically. " +
+      (reviewCount
+        ? `${reviewCount} document(s) require review and acceptance in IMS, followed by Recompute GSTR-2B, before their ITC is included. `
+        : "") +
+      "Review and save GSTR-3B again before payment.",
   };
 }
 function purchasesFor3b(w, p) {
@@ -222,6 +254,8 @@ module.exports = {
   eligible,
   actionFor,
   recompute,
+  recomputeBlocker,
+  refreshAfterChange,
   purchasesFor3b,
   finalize,
   asOf,

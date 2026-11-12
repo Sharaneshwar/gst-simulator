@@ -1,3 +1,4 @@
+import { ROWS_3B, TABLES_3B } from "./return-tables.mjs";
 import { Spinner } from "./loading";
 export {
   Spinner,
@@ -373,10 +374,17 @@ export function OtpResend({ delivery, onResend }) {
 export function Signing({ title, purpose, onSubmit, onClose }) {
   const { active, w, user, mutate } = usePortal();
   const recipient = user.email;
+  const methods = (purpose === "registration-submit"
+    ? w.registrationSigningMethods
+    : w.filingSigningMethods) || ["EVC", "DSC"];
+  const people =
+    (purpose === "registration-submit"
+      ? w.registrationSignatories
+      : w.filingSignatories) || [];
   const [form, setForm] = useState({
     declaration: false,
     signatory: "",
-    method: "EVC",
+    method: methods[0],
     email: recipient,
     otp: "",
     challengeId: "",
@@ -412,15 +420,21 @@ export function Signing({ title, purpose, onSubmit, onClose }) {
         disabled={Boolean(delivery)}
         value={form.signatory}
         onChange={(e) => setForm({ ...form, signatory: e.target.value })}
-        options={[signatoryName]}
+        options={people.length ? people : [user.name || signatoryName]}
       />
       <Select
         label="Filing method"
         disabled={Boolean(delivery)}
         value={form.method}
         onChange={(e) => setForm({ ...form, method: e.target.value })}
-        options={["EVC", "DSC"]}
+        options={methods}
       />
+      {methods.length === 1 && (
+        <p className="info">
+          This constitution of business requires DSC. Email verification
+          completes the practice signing step.
+        </p>
+      )}
       <Input
         label="Email Address for OTP"
         type="email"
@@ -491,12 +505,20 @@ export function Signing({ title, purpose, onSubmit, onClose }) {
     </Modal>
   );
 }
-export function ReturnPreview({ type, onClose }) {
+export function ReturnPreview({ type, onClose, systemGenerated = false }) {
   const { active, w, p } = usePortal();
   const data = type === "GSTR-1" ? p.gstr1 : p.gstr3b;
+  const previewTables = {
+    ...w.draft3b,
+    ...(!systemGenerated ? p.gstr3b.tables : {}),
+  };
   return (
     <Modal
-      title={`${type} — ${data.status === "Filed" ? "Filed Return" : "Draft Preview"}`}
+      title={
+        systemGenerated
+          ? "System Generated GSTR-3B"
+          : `${type} — ${data.status === "Filed" ? "Filed Return" : "Draft Preview"}`
+      }
       wide
       onClose={onClose}
     >
@@ -504,6 +526,21 @@ export function ReturnPreview({ type, onClose }) {
         <h2>FORM {type}</h2>
         <p>{periodLabel(w.period)}</p>
         <TaxpayerBar />
+        {systemGenerated && (
+          <p>
+            GSTR-1 source: {p.gstr1.status}. GSTR-2B:{" "}
+            {p.gstr2b?.computedAt
+              ? `Computed ${dateLabel(p.gstr2b.computedAt)}${w.gstr2bStale ? " (out of date)" : ""}`
+              : "Not yet computed"}
+            .
+          </p>
+        )}
+        {systemGenerated && (
+          <p className="info">
+            System-computed figures from GSTR-1 and GSTR-2B, before your manual
+            edits. Review the draft return separately before filing.
+          </p>
+        )}
         <p>
           Status: <b>{data.status}</b>
           {data.arn && (
@@ -525,13 +562,15 @@ export function ReturnPreview({ type, onClose }) {
               : [
                   [
                     "Outward tax",
-                    p.gstr3b.tables["3.1"]?.taxes ||
+                    (!systemGenerated && p.gstr3b.tables["3.1"]?.taxes) ||
                       w.draft3b?.["3.1"]?.taxes ||
                       (w.outwardSummary || w.summary).taxes,
                   ],
                   [
                     "Eligible ITC",
-                    p.gstr3b.tables["4"]?.taxes || w.eligibleItc,
+                    (!systemGenerated && p.gstr3b.tables["4"]?.taxes) ||
+                      w.draft3b?.["4"]?.taxes ||
+                      w.eligibleItc,
                   ],
                   ["Liability discharged", p.gstr3b.offset?.liability],
                 ]
@@ -585,35 +624,45 @@ export function ReturnPreview({ type, onClose }) {
                 </section>
               );
             })
-          : Object.entries({ ...w.draft3b, ...p.gstr3b.tables })
-              .filter(([key]) => !["3.1d", "4b"].includes(key))
-              .map(([key, table]) => (
-                <section key={key}>
-                  <h3>Table {key}</h3>
-                  <Table
-                    columns={[
-                      "Particulars / Place of Supply",
-                      "Taxable Value / Supplies",
-                      ...HEADS.map((h) => h.toUpperCase()),
-                    ]}
-                  >
-                    {(key === "3.2" && table.states?.length
-                      ? table.states.map((row) => [row.place, row])
-                      : Object.entries(table.rows || {}).filter(
-                          ([k]) => k !== "states",
-                        )
-                    ).map(([name, row]) => (
-                      <tr key={name}>
-                        <td>{name}</td>
-                        <td>{money(row.taxable)}</td>
-                        {HEADS.map((h) => (
-                          <td key={h}>{money(row.taxes?.[h])}</td>
-                        ))}
-                      </tr>
-                    ))}
-                  </Table>
-                </section>
-              ))}
+          : TABLES_3B.map(([key]) => [
+              key,
+              previewTables[key] || { rows: {} },
+            ]).map(([key, table]) => (
+              <section key={key}>
+                <h3>
+                  Table {key} — {TABLES_3B.find(([code]) => code === key)?.[1]}
+                </h3>
+                <Table
+                  columns={[
+                    "Particulars / Place of Supply",
+                    "Taxable Value / Supplies",
+                    ...HEADS.map((h) => h.toUpperCase()),
+                  ]}
+                >
+                  {(key === "3.2" && table.states?.length
+                    ? table.states.map((row) => [row.place, row])
+                    : (ROWS_3B[key] || []).map(([code]) => [
+                        code,
+                        table.rows?.[code] || {
+                          taxable: 0,
+                          taxes: key === "4" && code === "c" ? table.taxes : {},
+                        },
+                      ])
+                  ).map(([name, row]) => (
+                    <tr key={name}>
+                      <td>
+                        {ROWS_3B[key]?.find(([code]) => code === name)?.[1] ||
+                          name}
+                      </td>
+                      <td>{money(row.taxable)}</td>
+                      {HEADS.map((h) => (
+                        <td key={h}>{money(row.taxes?.[h])}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </Table>
+              </section>
+            ))}
         <p>
           Taxable value: ₹{" "}
           {money(

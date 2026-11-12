@@ -86,3 +86,36 @@ test("GSTR-3B exempt inward supplies use supplier/place-of-supply classification
   assert.equal(tables["5"].rows.exempt.taxes.igst, 1000);
   assert.equal(tables["5"].rows.exempt.taxes.cgst, 1000);
 });
+
+test("supplier JSON cannot silently turn missing tax data into zero or accept incompatible tax heads", () => {
+  assert.throws(
+    () => purchaseRow({ ...input, rate: undefined }, period, home),
+    /GST rate or explicit tax amounts/,
+  );
+  assert.throws(
+    () =>
+      purchaseRow(
+        { ...input, place: home, taxes: { igst: 180 } },
+        period,
+        home,
+      ),
+    /intra-State purchases/,
+  );
+  assert.throws(
+    () =>
+      purchaseRow(
+        { ...input, place: "Karnataka", taxes: { cgst: 90, sgst: 90 } },
+        period,
+        home,
+      ),
+    /inter-State purchases/,
+  );
+  assert.equal(
+    purchaseRow(
+      { ...input, rate: undefined, place: "Karnataka", taxes: { igst: 180 } },
+      period,
+      home,
+    ).taxes.igst,
+    180,
+  );
+});

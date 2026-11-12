@@ -139,3 +139,95 @@ test("BH, standard and special vehicle formats; GSTR-1 mislabeled as 3B is rejec
     /GSTR-1 invoice data/,
   );
 });
+
+test("EWB extension enforces the eight-hour window, transporter, transport details and 360-day cap", () => {
+  const doc = create(form());
+  const input = {
+    reason: "Transshipment",
+    remarks: "Vehicle breakdown",
+    remainingDistance: 400,
+    consignmentStatus: "In Transit",
+    transitType: "Warehouse",
+    currentPlace: "Pune Warehouse",
+    currentPincode: "411001",
+    currentState: "Maharashtra",
+    mode: "Road",
+    vehicle: "MH12AB9999",
+  };
+  const now = "2026-10-26T20:00:00+05:30";
+  const extended = eway.extendValidity(doc, input, now, taxpayer.gstin);
+  assert.equal(extended.previousValidUntil, doc.validUntil);
+  assert.equal(extended.validUntil, "2026-10-28T18:29:59.999Z");
+  assert.throws(
+    () =>
+      eway.extendValidity(
+        doc,
+        input,
+        "2026-10-25T12:00:00+05:30",
+        taxpayer.gstin,
+      ),
+    /eight hours/,
+  );
+  assert.throws(
+    () =>
+      eway.extendValidity(
+        doc,
+        input,
+        "2026-10-27T09:00:00+05:30",
+        taxpayer.gstin,
+      ),
+    /eight hours/,
+  );
+  for (const change of [
+    { remarks: "" },
+    { remainingDistance: 0 },
+    { currentPincode: "bad" },
+    { vehicle: "bad" },
+    { transitType: "" },
+  ])
+    assert.throws(() =>
+      eway.extendValidity(doc, { ...input, ...change }, now, taxpayer.gstin),
+    );
+  assert.throws(
+    () =>
+      eway.extendValidity(
+        { ...doc, transporterId: "29ABCDE1234F1Z5" },
+        input,
+        now,
+        taxpayer.gstin,
+      ),
+    /current transporter/,
+  );
+  assert.throws(
+    () =>
+      eway.extendValidity(
+        { ...doc, status: "Cancelled" },
+        input,
+        now,
+        taxpayer.gstin,
+      ),
+    /active/,
+  );
+  assert.throws(
+    () =>
+      eway.extendValidity(
+        {
+          ...doc,
+          referenceDate: "2026-01-01",
+          validUntil: "2026-12-26T18:29:59.999Z",
+        },
+        { ...input, remainingDistance: 4000 },
+        "2026-12-26T20:00:00+05:30",
+        taxpayer.gstin,
+      ),
+    /360 days/,
+  );
+  assert.equal(
+    eway.workingInstant({
+      period: "2026-10",
+      documentDates: { "2026-10": "2026-10-26" },
+      documentTimes: { "2026-10": "20:00" },
+    }),
+    now,
+  );
+});

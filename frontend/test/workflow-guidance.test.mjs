@@ -471,3 +471,54 @@ test("interest table has a recomputation action and invoice lists expose column 
   );
   assert.match(invoices, /Display\/Hide Columns/);
 });
+
+test("GSTR-3B warns about stale statements and blocks payment even when the old return was saved", () => {
+  const ctx = fixture();
+  ctx.p.gstr3b.saved = true;
+  ctx.w.gstr2bStale = true;
+  const html = render(returns.Gstr3b, ctx);
+  assert.match(html, /ITC shown below uses the previous statement/);
+  assert.match(html, /RECOMPUTE GSTR-2B/);
+  assert.match(
+    html,
+    /<button[^>]*disabled=""[^>]*aria-describedby="gstr3b-statement-requirement"/,
+  );
+});
+
+test("GSTR-3B exposes computed figures separately and explains why stale fees prevent payment", () => {
+  const ctx = fixture();
+  ctx.p.gstr3b.saved = true;
+  ctx.w.chargesStale = true;
+  const html = render(returns.Gstr3b, ctx);
+  assert.match(html, /SYSTEM GENERATED GSTR-3B/);
+  assert.match(html, /Interest and late fee are out of date/);
+  assert.match(
+    html,
+    /<button[^>]*disabled=""[^>]*aria-describedby="gstr3b-charges-requirement"/,
+  );
+  ctx.p.gstr3b.tables["4"] = { taxes: { igst: 999 } };
+  const computed = render(lib.ReturnPreview, ctx, {
+    type: "GSTR-3B",
+    systemGenerated: true,
+    onClose() {},
+  });
+  assert.match(computed, /System Generated GSTR-3B/);
+  assert.match(computed, /Import of goods/);
+  assert.doesNotMatch(computed, /999.00/);
+});
+
+test("filing defaults to required DSC and keeps signing disabled until a person is selected", () => {
+  const ctx = fixture();
+  ctx.w.filingSignatories = [
+    { value: "director@example.com", label: "Practice Director" },
+  ];
+  ctx.w.filingSigningMethods = ["DSC"];
+  const html = render(lib.Signing, ctx, {
+    title: "File GSTR-1",
+    purpose: "gstr1-file",
+  });
+  assert.match(html, /requires DSC/);
+  assert.match(html, /aria-label="Authorized Signatory"/);
+  assert.match(html, /disabled=""[^>]*>SEND OTP/);
+  assert.doesNotMatch(html, />EVC</);
+});

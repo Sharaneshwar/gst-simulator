@@ -616,7 +616,20 @@ function viewState(state, label) {
     monthly = flow.returnData(w, p);
   extensions.projection(w);
   w.registrationSignatories = registrationPeople.signatories(w.registration);
+  w.registrationSigningMethods = registrationPeople.signingOptions(
+    w,
+    state.taxpayer,
+    "registration-submit",
+  ).methods;
+  const filing = registrationPeople.signingOptions(
+    w,
+    state.taxpayer,
+    "gstr1-file",
+  );
+  w.filingSignatories = filing.people;
+  w.filingSigningMethods = filing.methods;
   w.documentDate = eway.workingDate(w);
+  w.documentTime = w.documentTimes?.[w.period] || "12:00";
   w.ewayMasters = {
     mapping: eway.MAPPING,
     units: eway.UQC,
@@ -641,6 +654,9 @@ function viewState(state, label) {
     ["Offset", "Filed"].includes(p.gstr3b.status) && p.gstr3b.offset
       ? structuredClone(p.gstr3b.offset)
       : paymentPlan(monthly, w);
+  w.chargesStale =
+    !!p.gstr3b.chargesBinding &&
+    p.gstr3b.chargesBinding !== extensions.chargeBinding(w, p, w.paymentPlan);
   return state;
 }
 function publicState(state) {
@@ -704,10 +720,35 @@ function mountPortal(app, deps) {
               }
             : { partA: w.registration.partA, tabs: w.registration.tabs },
   });
+  const validateSigner = (body, purpose, w, ctx) => {
+    const options = registrationPeople.signingOptions(
+      w,
+      ctx.active.state.taxpayer,
+      purpose,
+    );
+    if (!options.methods.includes(body.method))
+      fail("This constitution of business requires filing with DSC.");
+    const selected = String(body.signatory || "")
+      .trim()
+      .toLowerCase();
+    const exact = options.people.some(
+      (person) => person.value.toLowerCase() === selected,
+    );
+    const legacy = options.people.filter((person) =>
+      [person.label, ...(person.aliases || [])].some(
+        (alias) => alias.toLowerCase() === selected,
+      ),
+    );
+    if (options.people.length && !exact && legacy.length !== 1)
+      fail(
+        "Select an authorized signatory saved for this business or application.",
+      );
+  };
   const signingCheck = async (body, purpose, w, p, ctx) => {
     if (!body.declaration || !body.signatory)
       fail("Select the declaration and authorised signatory.");
     if (!["EVC", "DSC"].includes(body.method)) fail("Select a signing method.");
+    validateSigner(body, purpose, w, ctx);
     await getOtpService().consume({
       challengeId: body.challengeId,
       scope: otpScope(ctx, w, purpose),
@@ -741,7 +782,17 @@ function mountPortal(app, deps) {
         extensions.init(w);
         if (!readOnly && !path.startsWith("registration/"))
           irp.sync(w, ctx.active.state.taxpayer, validateInvoice);
+        const refreshInward = [
+          "purchases/save",
+          "purchases/upload",
+          "excel/import",
+        ].includes(path);
+        const inwardRevision = refreshInward ? ims.revision(w) : null;
         const result = (await handler(req.body || {}, w, p, ctx)) || {};
+        if (refreshInward && inwardRevision !== ims.revision(w)) {
+          result.statementRefresh = ims.refreshAfterChange(w);
+          result.message = `${result.message || "Details saved."} ${result.statementRefresh.message}`;
+        }
         if (path === "registration/submit") await completeRegistration(ctx);
         else if (!readOnly)
           await saveState(
@@ -824,6 +875,7 @@ function mountPortal(app, deps) {
       fail("Select a valid verification purpose.");
     if (!body.signatory || !["EVC", "DSC"].includes(body.method))
       fail("Select the authorised signatory and filing method first.");
+    validateSigner(body, purpose, w, ctx);
     if (
       purpose === "gstr1-file" &&
       (p.gstr1.status !== "Ready to File" ||
@@ -1341,11 +1393,20 @@ function mountPortal(app, deps) {
       fail("Save the GSTR-3B details before making payment.");
     if (p.gstr1.status !== "Filed")
       fail("File GSTR-1 for this period before filing GSTR-3B.");
+    if (p.purchases.length && ims.recomputeBlocker(w))
+      fail(ims.recomputeBlocker(w));
     if (p.gstr2b && p.gstr2b.sourceRevision !== ims.revision(w))
       fail(
         "Recompute GSTR-2B after the latest IMS or supplier-data changes before offsetting liability.",
       );
     const plan = paymentPlan(flow.returnData(w, p), w);
+    if (
+      p.gstr3b.chargesBinding &&
+      p.gstr3b.chargesBinding !== extensions.chargeBinding(w, p, plan)
+    )
+      fail(
+        "Re-compute Interest and Late Fee after changes to tax, ITC, processing date or filing-calendar settings before payment.",
+      );
     if (total(plan.shortfall))
       fail(
         "Insufficient cash balance. Create and pay a challan for the shortfall.",
@@ -1991,8 +2052,35 @@ function mountPortal(app, deps) {
         goods: ["hsn", "description"],
         verification: ["signatory", "place"],
       }[body.tab] || [];
-    if (required.some((key) => !String(body.values?.[key] || "").trim()))
-      fail("Complete the mandatory fields before saving this tab.");
+    const fieldLabels = {
+      tradeName: "Trade Name",
+      constitution: "Constitution of Business",
+      reason: "Reason to obtain registration",
+      commencement: "Date of commencement",
+      name: "Name",
+      pan: "PAN",
+      designation: "Designation",
+      email: "Email Address",
+      mobile: "Mobile Number",
+      address: "Address",
+      city: "City",
+      pincode: "PIN Code",
+      possession: "Nature of possession",
+      hsn: "HSN / SAC",
+      description: "Description",
+      signatory: "Authorized Signatory",
+      place: "Place",
+    };
+    const missingRequired = (item) =>
+      required
+        .filter((key) => !String(item?.[key] || "").trim())
+        .map((key) => fieldLabels[key] || key);
+    if (missingRequired(body.values).length)
+      fail(
+        "Complete the mandatory fields before saving this tab: " +
+          missingRequired(body.values).join(", ") +
+          ".",
+      );
     if (body.tab === "principal" && !/^\d{6}$/.test(body.values.pincode))
       fail("Enter a valid six-digit PIN code.");
     if (body.tab === "business") {
@@ -2037,8 +2125,51 @@ function mountPortal(app, deps) {
     )
       fail("Add at most 20 records per section.");
     for (const item of values.records || [values]) {
-      if (required.some((key) => !String(item[key] || "").trim()))
-        fail("Complete mandatory fields in every record.");
+      if (
+        body.tab === "additional" &&
+        values.hasAdditional === "Yes" &&
+        ["address", "city", "pincode", "possession"].some(
+          (key) => !String(item[key] || "").trim(),
+        )
+      )
+        fail(
+          "Complete the address, city, PIN code and possession type for every additional place of business.",
+        );
+      if (
+        body.tab === "representative" &&
+        values.appointed === "Yes" &&
+        (!item.name ||
+          (!item.enrolment &&
+            (!item.designation || !item.email || !item.mobile)))
+      )
+        fail(
+          "Enter the representative's name and enrolment ID, or their designation, email and mobile number.",
+        );
+      if (item.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item.email))
+        fail("Enter a valid email address.");
+      if (item.mobile && !/^[6-9]\d{9}$/.test(item.mobile))
+        fail("Enter a valid ten-digit Indian mobile number.");
+      if (item.pincode && !/^\d{6}$/.test(item.pincode))
+        fail("Enter a valid six-digit PIN code.");
+      for (const key of [
+        "dob",
+        "commencement",
+        "liabilityDate",
+        "registrationDate",
+        "sezLoaDate",
+        "validFrom",
+        "validTo",
+      ])
+        if (item[key] && !flow.validDate(item[key]))
+          fail("Enter a valid date for " + key + ".");
+      if (item.dob && item.dob > new Date().toISOString().slice(0, 10))
+        fail("Date of birth cannot be in the future.");
+      if (missingRequired(item).length)
+        fail(
+          "Complete mandatory fields in every record: " +
+            missingRequired(item).join(", ") +
+            ".",
+        );
       if (item.pan && !/^[A-Z]{5}\d{4}[A-Z]$/.test(item.pan))
         fail("Enter a valid PAN.");
       if (item.din && !/^\d{7,8}$/.test(item.din))
@@ -2105,7 +2236,11 @@ function mountPortal(app, deps) {
   route("documents/date", (body, w) => {
     if (!flow.validDate(body.date)) fail("Enter a valid working date.");
     w.documentDates ||= {};
+    if (body.time !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(body.time))
+      fail("Enter a valid working time (IST).");
     w.documentDates[w.period] = body.date;
+    w.documentTimes ||= {};
+    w.documentTimes[w.period] = body.time || "12:00";
     return { message: "Working date updated." };
   });
   route("documents/registration-otp", async (body, w, p, ctx) => {
@@ -2229,6 +2364,10 @@ function mountPortal(app, deps) {
         errors.push({ row: i + 1, number: form.number, error: e.message });
       }
     });
+    accepted.forEach((doc) => {
+      doc.issuedAt = eway.workingInstant(w);
+      doc.period = w.period;
+    });
     w.documents[body.kind].unshift(...accepted);
     w.documentUploads ||= [];
     const upload = {
@@ -2256,6 +2395,7 @@ function mountPortal(app, deps) {
         eway.workingDate(w),
       );
       doc.period = w.period;
+      doc.issuedAt = eway.workingInstant(w);
       w.documents[kind].unshift(doc);
       return {
         document: doc,
@@ -2322,19 +2462,44 @@ function mountPortal(app, deps) {
   route("documents/update", (body, w, p, ctx) => {
     const doc = w.documents[body.kind]?.find((d) => d.id === body.id);
     if (!doc) fail("Document not found.");
+    if (doc.referenceDate) documentLogin(w, body.kind);
+    if (
+      doc.referenceDate &&
+      doc.issuedAt &&
+      Date.parse(eway.workingInstant(w)) < Date.parse(doc.issuedAt)
+    )
+      fail(
+        "The working date/time cannot be before the document was generated.",
+      );
     if (doc.status === "Cancelled") fail("This document is cancelled.");
     if (body.action === "cancel") {
       if (!body.reason) fail("Select a cancellation reason.");
       if (
         (doc.referenceDate
-          ? Date.parse(eway.workingDate(w) + "T12:00:00+05:30") -
-            Date.parse(doc.issuedAt)
+          ? Date.parse(eway.workingInstant(w)) - Date.parse(doc.issuedAt)
           : Date.now() - Date.parse(doc.createdAt)) > 86400000
       )
         fail("The 24-hour cancellation window has expired.");
       doc.status = "Cancelled";
       doc.reason = body.reason;
       doc.remarks = String(body.remarks || "").slice(0, 500);
+    } else if (body.action === "extend" && body.kind === "eway") {
+      const extension = eway.extendValidity(
+        doc,
+        {
+          ...body,
+          currentState: flow.stateName(body.currentState),
+        },
+        eway.workingInstant(w),
+        ctx.active.state.taxpayer.gstin,
+      );
+      doc.extensions ||= [];
+      doc.extensions.push(extension);
+      doc.validUntil = extension.validUntil;
+      doc.vehicle = extension.vehicle;
+      doc.mode = extension.mode;
+      doc.transportDocument = extension.transportDocument;
+      doc.transportDate = extension.transportDate;
     } else if (body.action === "vehicle" && body.kind === "eway") {
       const workingDate = eway.workingDate(w);
       if (doc.status === "Part A") {
@@ -2374,13 +2539,12 @@ function mountPortal(app, deps) {
         );
         doc.partAOnly = false;
         doc.status = "Active";
-        doc.partBAt = workingDate + "T12:00:00+05:30";
+        doc.partBAt = eway.workingInstant(w);
       } else if (!eway.vehicleValid(body.vehicle))
         fail("Enter a valid vehicle number.");
       if (
         doc.validUntil &&
-        Date.parse(eway.workingDate(w) + "T12:00:00+05:30") >
-          Date.parse(doc.validUntil)
+        Date.parse(eway.workingInstant(w)) > Date.parse(doc.validUntil)
       )
         fail("The e-way bill has expired. Vehicle update is unavailable.");
       doc.vehicle = body.vehicle;

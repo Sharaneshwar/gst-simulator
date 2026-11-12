@@ -335,3 +335,65 @@ test("business amendments stay attached to their original company after switchin
     "First Practice Company Updated",
   );
 });
+
+test("conditional registration branches reject incomplete addresses and representative details with actionable errors", async () => {
+  await action("registration/new");
+  await start("Conditional Practice Company");
+  let result = await action("registration/save", {
+    tab: "additional",
+    values: { hasAdditional: "Yes" },
+  });
+  assert.equal(result.code, 400);
+  assert.match(result.message, /address, city, PIN code and possession/);
+  result = await action("registration/save", {
+    tab: "additional",
+    values: {
+      hasAdditional: "Yes",
+      address: "Practice Road",
+      city: "Pune",
+      pincode: "411001",
+      possession: "Own",
+    },
+  });
+  assert.equal(result.code, 200, result.message);
+  assert.equal(
+    (
+      await action("registration/save", {
+        tab: "representative",
+        values: { appointed: "Yes" },
+      })
+    ).code,
+    400,
+  );
+  assert.equal(
+    (
+      await action("registration/save", {
+        tab: "representative",
+        values: {
+          appointed: "Yes",
+          name: "Practice Representative",
+          designation: "Consultant",
+          email: account.email,
+          mobile: "9876543210",
+        },
+      })
+    ).code,
+    200,
+  );
+  for (const fields of [
+    { mobile: "123" },
+    { email: "bad email" },
+    { dob: "2026-02-30" },
+  ]) {
+    result = await action("registration/save", {
+      tab: "signatory",
+      values: {
+        name: "Practice Person",
+        mobile: "9876543210",
+        email: account.email,
+        ...fields,
+      },
+    });
+    assert.equal(result.code, 400, JSON.stringify(fields));
+  }
+});

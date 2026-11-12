@@ -105,3 +105,33 @@ test("single-record legacy signatories work and shared contact emails stay disti
     "Second Person",
   );
 });
+
+test("filing choices retain completed-business signatories while a separate new registration is in progress", () => {
+  const { signingOptions } = require("../registration-people");
+  const saved = [
+    {
+      value: "signer@example.com",
+      label: "Practice Director",
+      aliases: ["Practice Director"],
+    },
+  ];
+  const w = {
+    registration: {
+      stage: "draft",
+      tabs: {
+        business: { constitution: "Proprietorship" },
+        signatory: { name: "New Applicant", email: "new@example.com" },
+      },
+    },
+  };
+  const filing = signingOptions(
+    w,
+    { constitution: "Private Limited Company", signatories: saved },
+    "gstr1-file",
+  );
+  assert.deepEqual(filing.methods, ["DSC"]);
+  assert.deepEqual(filing.people, saved);
+  const application = signingOptions(w, {}, "registration-submit");
+  assert.deepEqual(application.methods, ["EVC", "DSC"]);
+  assert.equal(application.people[0].label, "New Applicant");
+});

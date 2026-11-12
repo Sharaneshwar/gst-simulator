@@ -1,3 +1,4 @@
+import { RecomputeStatement } from "./statement-refresh";
 import { InvoiceRateGrid } from "./invoice-rate-grid";
 import { resetTaxOverrides } from "./return-entry.mjs";
 import { stateFromGstin } from "./gst-states.mjs";
@@ -227,12 +228,13 @@ export function SupplierStatement({ type }) {
         <Btn tone="secondary" onClick={() => go("ims")}>
           OPEN IMS DASHBOARD
         </Btn>
-        {is2b && (
-          <Btn tone="secondary" onClick={() => go("ims")}>
-            RECOMPUTE GSTR-2B
-          </Btn>
-        )}
+        {is2b && <RecomputeStatement />}
       </div>
+      {is2b && w.gstr2bRefreshBlocked && (
+        <p className="info" role="status">
+          {w.gstr2bRefreshBlocked}
+        </p>
+      )}
       {is2b && w.gstr2bStale && (
         <p className="info" role="status">
           The statement predates the latest IMS changes. Recompute GSTR-2B

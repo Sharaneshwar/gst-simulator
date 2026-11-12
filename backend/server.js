@@ -408,7 +408,10 @@ async function setupDatabase() {
   }
   // Existing accounts persist. Demo logins are an explicit local/test fixture,
   // so deleting a live account cannot recreate it on the next deployment.
-  if (process.env.GST_SEED_DEMO_USERS !== "1" || process.env.NODE_ENV === "production")
+  if (
+    process.env.GST_SEED_DEMO_USERS !== "1" ||
+    process.env.NODE_ENV === "production"
+  )
     return;
   const addUser = db.prepare(
     "INSERT INTO users (id, name, email, password_hash, role, created_at) VALUES (@id, @name, @email, @password_hash, @role, @created_at) ON CONFLICT(id) DO NOTHING",
@@ -628,6 +631,8 @@ async function completeRegistration(ctx) {
   const business = {
     legalName: r.partA.legalName,
     tradeName: r.tabs.business.tradeName,
+    constitution: r.tabs.business.constitution,
+    signatories: require("./registration-people").signatories(r),
     pan: r.partA.pan,
     state: r.partA.state,
     email: ctx.user.email,

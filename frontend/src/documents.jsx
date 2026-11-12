@@ -34,10 +34,19 @@ const ITEM = {
   cess: 0,
 };
 const MODES = ["Road", "Rail", "Air", "Ship"];
+const dateTime = (value) =>
+  value
+    ? new Date(value).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) +
+      " IST"
+    : "—";
 function Preview({ doc, kind, onClose, intent }) {
   const { active, mutate } = usePortal();
   const [action, setAction] = useState(
-      intent === "cancel" && doc.status !== "Cancelled" ? "cancel" : "",
+      intent === "extend" && doc.status === "Active"
+        ? "extend"
+        : intent === "cancel" && doc.status !== "Cancelled"
+          ? "cancel"
+          : "",
     ),
     [reason, setReason] = useState(""),
     [remarks, setRemarks] = useState(""),
@@ -48,6 +57,14 @@ function Preview({ doc, kind, onClose, intent }) {
       doc.transportDocument || "",
     ),
     [transportDate, setTransportDate] = useState(doc.transportDate || "");
+  const [extension, setExtension] = useState({
+    remainingDistance: "",
+    consignmentStatus: "In Movement",
+    transitType: "",
+    currentPlace: "",
+    currentPincode: "",
+    currentState: "",
+  });
   const eway = kind === "eway";
   useEffect(() => {
     let alive = true;
@@ -82,7 +99,7 @@ function Preview({ doc, kind, onClose, intent }) {
               eway ? doc.number : doc.acknowledgement,
             ],
             ...(!eway ? [["IRN", doc.irn]] : []),
-            ["Generated On", dateLabel(doc.issuedAt || doc.createdAt)],
+            ["Generated On", dateTime(doc.issuedAt || doc.createdAt)],
             ["Document No.", doc.invoice.number],
             ["Document Date", dateLabel(doc.invoice.date)],
             [
@@ -97,7 +114,7 @@ function Preview({ doc, kind, onClose, intent }) {
                   ["Vehicle", doc.vehicle],
                   ["Mode", doc.mode],
                   ["Approximate Distance", `${doc.distance || 0} KM`],
-                  ["Valid Until", dateLabel(doc.validUntil)],
+                  ["Valid Until", dateTime(doc.validUntil)],
                   ["Transport Document", doc.transportDocument],
                   ["Transport Document Date", dateLabel(doc.transportDate)],
                   [
@@ -148,12 +165,134 @@ function Preview({ doc, kind, onClose, intent }) {
           Total Taxable Value: ₹ {money(doc.invoice.taxable)} · Total Invoice
           Value: ₹ {money(doc.invoice.invoiceValue)}
         </p>
+        {!!doc.extensions?.length && (
+          <section>
+            <h3>Validity Extension History</h3>
+            <Table
+              columns={[
+                "Extended On (IST)",
+                "Reason",
+                "Current Place",
+                "Remaining KM",
+                "Valid Until (IST)",
+              ]}
+            >
+              {doc.extensions.map((record, index) => (
+                <tr key={index}>
+                  <td>{dateTime(record.at)}</td>
+                  <td>
+                    {record.reason} — {record.remarks}
+                  </td>
+                  <td>{record.currentPlace}</td>
+                  <td>{record.remainingDistance}</td>
+                  <td>{dateTime(record.validUntil)}</td>
+                </tr>
+              ))}
+            </Table>
+          </section>
+        )}
         {doc.status === "Cancelled" && (
           <p>
             Reason: {doc.reason} · Remarks: {doc.remarks}
           </p>
         )}
       </div>
+      {action === "extend" && (
+        <Panel title="Extend Validity">
+          <p>
+            Only the current transporter can extend validity within eight hours
+            before or after expiry. Invoice and tax values stay with the
+            original document.
+          </p>
+          <div className="form-grid">
+            <Select
+              label="Extension Reason"
+              required
+              value={reason}
+              options={[
+                "Natural Calamity",
+                "Law and Order",
+                "Accident",
+                "Transshipment",
+                "Others",
+              ]}
+              onChange={(e) => setReason(e.target.value)}
+            />
+            <Input
+              label="Remarks"
+              required
+              value={remarks}
+              maxLength={500}
+              onChange={(e) => setRemarks(e.target.value)}
+            />
+            <Select
+              label="Consignment Status"
+              required
+              value={extension.consignmentStatus}
+              options={["In Movement", "In Transit"]}
+              onChange={(e) =>
+                setExtension({
+                  ...extension,
+                  consignmentStatus: e.target.value,
+                })
+              }
+            />
+            {extension.consignmentStatus === "In Transit" && (
+              <Select
+                label="Transit Type"
+                required
+                value={extension.transitType}
+                options={["On Road", "Warehouse", "Others"]}
+                onChange={(e) =>
+                  setExtension({ ...extension, transitType: e.target.value })
+                }
+              />
+            )}
+            <Input
+              label="Current Place / Address"
+              required
+              value={extension.currentPlace}
+              onChange={(e) =>
+                setExtension({ ...extension, currentPlace: e.target.value })
+              }
+            />
+            <Input
+              label="Current PIN Code"
+              required
+              value={extension.currentPincode}
+              maxLength={6}
+              onChange={(e) =>
+                setExtension({ ...extension, currentPincode: e.target.value })
+              }
+            />
+            <Select
+              label="Current State / UT"
+              required
+              value={extension.currentState}
+              options={STATES.filter(
+                (state) => !["Other State", "Outside India"].includes(state),
+              )}
+              onChange={(e) =>
+                setExtension({ ...extension, currentState: e.target.value })
+              }
+            />
+            <Input
+              label="Approximate Remaining Distance (KM)"
+              type="number"
+              required
+              min={1}
+              max={4000}
+              value={extension.remainingDistance}
+              onChange={(e) =>
+                setExtension({
+                  ...extension,
+                  remainingDistance: e.target.value,
+                })
+              }
+            />
+          </div>
+        </Panel>
+      )}
       {action === "cancel" && (
         <div className="form-grid">
           <Select
@@ -176,9 +315,9 @@ function Preview({ doc, kind, onClose, intent }) {
           />
         </div>
       )}
-      {action === "vehicle" && (
+      {["vehicle", "extend"].includes(action) && (
         <div className="form-grid">
-          {doc.status === "Part A" && (
+          {(doc.status === "Part A" || action === "extend") && (
             <>
               <Select
                 label="Mode"
@@ -225,6 +364,11 @@ function Preview({ doc, kind, onClose, intent }) {
                 {doc.status === "Part A" ? "UPDATE PART B" : "UPDATE VEHICLE"}
               </Btn>
             )}
+            {eway && doc.status === "Active" && (
+              <Btn tone="secondary" onClick={() => setAction("extend")}>
+                EXTEND VALIDITY
+              </Btn>
+            )}
             <Btn tone="danger" onClick={() => setAction("cancel")}>
               CANCEL {eway ? "EWB" : "IRN"}
             </Btn>
@@ -245,6 +389,7 @@ function Preview({ doc, kind, onClose, intent }) {
                 mode,
                 transportDocument,
                 transportDate,
+                ...(action === "extend" ? extension : {}),
               });
               onClose();
             }}
@@ -321,9 +466,11 @@ export function Documents({ kind }) {
     [to, setTo] = useState("");
   const [drawer, setDrawer] = useState(false);
   const [working, setWorking] = useState(w.documentDate || "");
+  const [workingTime, setWorkingTime] = useState(w.documentTime || "12:00");
   useEffect(() => {
     setWorking(w.documentDate || "");
-  }, [w.documentDate]);
+    setWorkingTime(w.documentTime || "12:00");
+  }, [w.documentDate, w.documentTime]);
   useEffect(() => {
     const close = (e) => {
       if (e.key === "Escape") setDrawer(false);
@@ -359,8 +506,8 @@ export function Documents({ kind }) {
     }));
   const docs = w.documents[kind].filter(
     (d) =>
-      (!from || d.createdAt.slice(0, 10) >= from) &&
-      (!to || d.createdAt.slice(0, 10) <= to),
+      (!from || (d.issuedAt || d.createdAt).slice(0, 10) >= from) &&
+      (!to || (d.issuedAt || d.createdAt).slice(0, 10) <= to),
   );
   const subtotal = form.items.reduce(
     (n, i) =>
@@ -605,9 +752,17 @@ export function Documents({ kind }) {
               value={working}
               onChange={(e) => setWorking(e.target.value)}
             />
+            <Input
+              label="Working Time (IST)"
+              type="time"
+              value={workingTime}
+              onChange={(e) => setWorkingTime(e.target.value)}
+            />
             <Btn
               tone="secondary"
-              onClick={() => mutate("documents/date", { date: working })}
+              onClick={() =>
+                mutate("documents/date", { date: working, time: workingTime })
+              }
             >
               SET DATE
             </Btn>
@@ -640,6 +795,7 @@ export function Documents({ kind }) {
                 ["generate", eway ? "Generate New" : "Generate IRN"],
                 ["bulk", eway ? "Generate Bulk" : "Bulk Upload"],
                 ["cancel", "Cancel"],
+                ...(eway ? [["extend", "Extend Validity"]] : []),
               ].map(([k, n]) => (
                 <button
                   key={k}
@@ -711,8 +867,16 @@ export function Documents({ kind }) {
                   </Table>
                 </Panel>
               )}
-              {page === "cancel" && (
-                <Panel title={eway ? "Cancel e-Way Bill" : "Cancel e-Invoice"}>
+              {["cancel", "extend"].includes(page) && (
+                <Panel
+                  title={
+                    page === "extend"
+                      ? "Extend e-Way Bill Validity"
+                      : eway
+                        ? "Cancel e-Way Bill"
+                        : "Cancel e-Invoice"
+                  }
+                >
                   <div className="form-grid">
                     {!eway && (
                       <Select

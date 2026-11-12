@@ -116,6 +116,7 @@ test("Excel preview is read-only, and reviewed import persists purchases atomica
     period: "2026-10",
     target: "sales",
   };
+  await action("ims/recompute");
   const before = await request("/portal");
   const inspected = await action("excel/preview", body);
   assert.equal(inspected.code, 200, inspected.message);
@@ -162,6 +163,27 @@ test("Excel preview is read-only, and reviewed import persists purchases atomica
   assert.equal(saved.taxes.igst, 180);
   assert.equal(saved.rate, 18);
   assert.equal(saved.importSource.row, 2);
+  assert.equal(imported.statementRefresh.refreshed, true);
+  assert.equal(imported.statementRefresh.reviewCount, 1);
+  assert.match(imported.message, /require review and acceptance in IMS/);
+  assert.equal(imported.state.workspace.gstr2bStale, false);
+  assert.ok(
+    imported.state.workspace.gstr2bRecords.some((row) => row.id === saved.id),
+  );
+  const beforeCredit = imported.state.workspace.eligibleItc.igst;
+  const accepted = await action("ims/action", {
+    ids: [saved.id],
+    action: "Accepted",
+  });
+  assert.equal(accepted.code, 200, accepted.message);
+  assert.equal(accepted.state.workspace.gstr2bStale, true);
+  const refreshed = await action("ims/recompute");
+  assert.equal(refreshed.state.workspace.gstr2bStale, false);
+  assert.equal(refreshed.state.workspace.eligibleItc.igst, beforeCredit + 180);
+  assert.equal(
+    refreshed.state.workspace.draft3b["4"].taxes.igst,
+    beforeCredit + 180,
+  );
   const reread = await request("/portal");
   assert.ok(
     reread.activeCase.state.workspace.periods["2026-10"].purchases.some(
@@ -177,6 +199,33 @@ test("Excel preview is read-only, and reviewed import persists purchases atomica
       })
     ).code,
     400,
+  );
+  // A later upload must refresh the existing snapshot again without duplicating prior ITC.
+  sheet.getCell("C2").value = "XLSX/TEST2";
+  const secondBody = {
+    ...body,
+    base64: Buffer.from(await book.xlsx.writeBuffer()).toString("base64"),
+  };
+  const secondPreview = await action("excel/preview", secondBody);
+  const secondImport = await action("excel/import", {
+    ...secondBody,
+    fingerprint: secondPreview.preview.fingerprint,
+    reviewed: true,
+  });
+  assert.equal(secondImport.code, 200, secondImport.message);
+  assert.equal(secondImport.state.workspace.gstr2bStale, false);
+  const second = secondImport.state.workspace.periods["2026-10"].purchases.find(
+    (row) => row.number === "XLSX/TEST2",
+  );
+  const secondAccepted = await action("ims/action", {
+    ids: [second.id],
+    action: "Accepted",
+  });
+  assert.equal(secondAccepted.state.workspace.gstr2bStale, true);
+  const secondRefreshed = await action("ims/recompute");
+  assert.equal(
+    secondRefreshed.state.workspace.eligibleItc.igst,
+    beforeCredit + 360,
   );
   assert.equal((await request("/workspace/excel/preview", body, "")).code, 401);
 });
@@ -652,7 +701,10 @@ test("registration verifies both OTPs, resumes TRN and requires all tabs", async
       signatoryId: partA.email,
     });
   }
-  const submitted = await action("registration/submit", sign);
+  const submitted = await action("registration/submit", {
+    ...sign,
+    signatory: "Example",
+  });
   assert.equal(submitted.code, 200);
   assert.equal(
     submitted.state.workspace.registration.stage,
@@ -1485,7 +1537,27 @@ test("company registration retains directors, HSN records and attachments in a s
     ).code,
     400,
   );
-  assert.equal((await action("registration/submit", sign)).code, 200);
+  assert.equal(
+    (
+      await action("signing/send", {
+        purpose: "registration-submit",
+        ...sign,
+        signatory: "Akash",
+      })
+    ).code,
+    400,
+    "companies require DSC",
+  );
+  assert.equal(
+    (
+      await action("registration/submit", {
+        ...sign,
+        signatory: "Akash",
+        method: "DSC",
+      })
+    ).code,
+    200,
+  );
   const oldArn = (await request("/portal")).activeCase.state.workspace
     .registration.arn;
   const next = await action("registration/new");
@@ -2039,4 +2111,109 @@ test("invoice numbers are unique across return months and invoice tables in the 
     ).code,
     200,
   );
+});
+
+test("e-way validity extension persists history and updated transport without changing invoice taxes or return entries", async () => {
+  await reset();
+  await action("period", { period: "2022-10" });
+  await documentLogin("eway");
+  await action("documents/date", { date: "2022-10-12", time: "10:30" });
+  const gstin = (await request("/portal")).activeCase.state.taxpayer.gstin;
+  const generated = await action("documents/create", {
+    kind: "eway",
+    form: documentForm(gstin, "EXT/1"),
+  });
+  assert.equal(generated.code, 200, generated.message);
+  assert.equal(generated.document.issuedAt, "2022-10-12T10:30:00+05:30");
+  const before = generated.document.invoice;
+  assert.equal(
+    (await action("documents/date", { date: "2022-10-13", time: "25:10" }))
+      .code,
+    400,
+  );
+  await action("documents/date", { date: "2022-10-13", time: "20:00" });
+  const body = {
+    kind: "eway",
+    id: generated.document.id,
+    action: "extend",
+    reason: "Transshipment",
+    remarks: "Vehicle breakdown",
+    remainingDistance: 400,
+    consignmentStatus: "In Movement",
+    currentPlace: "Pune",
+    currentPincode: "411001",
+    currentState: "Maharashtra",
+    mode: "Road",
+    vehicle: "MH12AB9999",
+  };
+  const extended = await action("documents/update", body);
+  assert.equal(extended.code, 200, extended.message);
+  const reread = (await request("/portal")).activeCase.state.workspace;
+  const doc = reread.documents.eway.find((row) => row.id === body.id);
+  assert.deepEqual(doc.invoice, before);
+  assert.equal(doc.vehicle, "MH12AB9999");
+  assert.equal(doc.extensions.length, 1);
+  assert.equal(
+    doc.extensions[0].previousValidUntil,
+    generated.document.validUntil,
+  );
+  assert.equal(doc.validUntil, "2022-10-15T18:29:59.999Z");
+  assert.equal(
+    (await action("documents/update", body)).code,
+    400,
+    "the new expiry is outside the extension window",
+  );
+  await action("documents/logout", { kind: "eway" });
+  const loggedOut = await action("documents/update", {
+    kind: "eway",
+    id: body.id,
+    action: "vehicle",
+    vehicle: "MH12AB1111",
+  });
+  assert.equal(loggedOut.code, 400);
+  assert.match(loggedOut.message, /Log in to this document portal/);
+});
+
+test("IRP synchronization, HSN replacement and the source workbook finish through authenticated HTTP routes", async () => {
+  await reset();
+  await action("period", { period: "2022-10" });
+  await documentLogin("einvoice");
+  await action("documents/date", { date: "2022-10-12" });
+  await action("calendar/date", { date: "2022-10-12" });
+  const gstin = (await request("/portal")).activeCase.state.taxpayer.gstin;
+  const generated = await action("documents/create", {
+    kind: "einvoice",
+    form: documentForm(gstin, "IRP/HTTP1"),
+  });
+  assert.equal(generated.code, 200, generated.message);
+  const early = await action("gstr1/sync-irn");
+  assert.equal(
+    early.state.workspace.periods["2022-10"].invoices.some(
+      (row) => row.sourceDocumentId === generated.document.id,
+    ),
+    false,
+  );
+  await action("calendar/date", { date: "2022-10-14" });
+  const synced = await action("gstr1/sync-irn");
+  assert.equal(synced.code, 200, synced.message);
+  assert.equal(
+    synced.state.workspace.periods["2022-10"].invoices.filter(
+      (row) => row.sourceDocumentId === generated.document.id,
+    ).length,
+    1,
+  );
+  assert.equal((await action("gstr1/import-hsn")).code, 400);
+  const hsn = await action("gstr1/import-hsn", { confirm: true });
+  assert.equal(hsn.code, 200, hsn.message);
+  assert.ok(
+    hsn.state.workspace.periods["2022-10"].invoices.some(
+      (row) => row.section === "HSN",
+    ),
+  );
+  const exported = await action("gstr1/export-irn");
+  assert.equal(exported.code, 200, exported.message);
+  const ExcelJS = require("exceljs"),
+    book = new ExcelJS.Workbook();
+  await book.xlsx.load(Buffer.from(exported.base64, "base64"));
+  assert.equal(book.worksheets[0].getCell("A2").value, "IRP/HTTP1");
 });

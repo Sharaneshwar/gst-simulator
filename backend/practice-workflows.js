@@ -726,6 +726,14 @@ function purchaseRow(input, period, homeState) {
   const dt = date(input.date);
   if (dt.slice(0, 7) !== period || !validDate(dt))
     fail("Purchase date must match the selected month.");
+  const hasRate =
+    input.rate !== undefined && input.rate !== null && input.rate !== "";
+  const hasTaxAmounts =
+    input.taxes && HEADS.some((head) => Object.hasOwn(input.taxes, head));
+  if (!hasRate && !hasTaxAmounts)
+    fail(
+      "Provide a GST rate or explicit tax amounts for the supplier document.",
+    );
   const place = stateName(input.place || homeState),
     rate = amount(input.rate),
     taxable = amount(input.taxable),
@@ -751,6 +759,10 @@ function purchaseRow(input, period, homeState) {
         sgst: inter ? 0 : round(tax - round(tax / 2)),
         cess: amount(input.cess),
       };
+  if (inter ? taxes.cgst || taxes.sgst : taxes.igst)
+    fail(
+      "Use IGST for inter-State purchases, or CGST and SGST/UTGST for intra-State purchases, based on supplier state and Place of Supply.",
+    );
   return {
     id: input.id || crypto.randomUUID(),
     gstin,

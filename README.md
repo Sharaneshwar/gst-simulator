@@ -9,7 +9,7 @@ Each account has independent business records. Each business has separate monthl
 - **Frontend:** React 19 + Vite, deployed to Vercel.
 - **Backend:** Express 5 API, deployed to Render.
 - **Storage:** Neon PostgreSQL through a shared `pg` connection pool. SQLite is available only as an explicit non-production test/development option with `SQLITE_PATH`.
-- **Practice model:** one independent business per account, monthly return state and filing history. Five business fixtures remain available only to explicit non-production regression tests.
+- **Practice model:** independent businesses and registration applications per account, monthly return state and filing history. Five business fixtures remain available only to explicit non-production regression tests.
 - **Reference styling:** Verdana, matching the observed live portal. The masthead emblem and industrial banner are local copies of publicly served GST portal assets; their source URLs are listed below.
 
 ## Local development
@@ -36,7 +36,7 @@ Configure `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct, for migra
 
 Run `npm test` from `backend` for isolated temporary-SQLite regression tests; these do not change teaching records. Run `npm run build` from the repository root to verify the production frontend bundle. See [Neon setup and migration](docs/neon-setup.md) for import and cloud test commands.
 
-See [the local review guide](docs/local-review.md) for suggested browser checks and the boundaries of this review build.
+See [the workflow audit](docs/workflow-audit-2026-11-12.md) for current traces, official references, fixes and verification limits. The [local review guide](docs/local-review.md) describes the isolated test environment.
 
 ## Email OTPs
 
@@ -44,7 +44,7 @@ On Render Free, set `MAIL_PROVIDER=brevo`, `BREVO_API_KEY` and `EMAIL_FROM` in t
 
 Registration sends one email containing one code; learners use the same code in the Mobile OTP and Email OTP fields. No SMS is sent. TRN resume and registration/return filing also send real email verification codes. Demo login addresses remain unchanged; filing dialogs ask for an actual email address to receive the OTP.
 
-Codes are cryptographically generated, hashed in SQLite, valid for 10 minutes, limited to five failed attempts and consumed once. Resending waits 60 seconds and invalidates the previous challenge. Sending is rate-limited per account and email address. Codes are bound to the user, business, purpose and filing details. Failed deliveries never fall back to a hard-coded OTP.
+Codes are cryptographically generated, hashed in the configured database (Neon PostgreSQL in production), valid for 10 minutes, limited to five failed attempts and consumed once. Resending waits 60 seconds and invalidates the previous challenge. Sending is rate-limited per account and email address. Codes are bound to the user, business, purpose and filing details. Failed deliveries never fall back to a hard-coded OTP.
 
 Run `node scripts/check-email.js` from `backend` to verify the provider credentials and active configured sender without sending a message. Add `--send-self` to send one delivery-test email to the configured sender's inbox. Automated tests mock SMTP and HTTPS transports and never send real messages. Provider acceptance is not a guarantee of inbox delivery.
 

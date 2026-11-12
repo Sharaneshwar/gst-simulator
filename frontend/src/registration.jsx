@@ -91,7 +91,10 @@ const FIELDS = {
   representative: [
     ["appointed", "Do you have an Authorized Representative?", ["No", "Yes"]],
     ["name", "Name of Representative", "text"],
-    ["enrolment", "Enrolment ID", "text"],
+    ["enrolment", "Enrolment ID (GST Practitioner, if applicable)", "text"],
+    ["designation", "Designation", "text"],
+    ["mobile", "Mobile Number", "tel"],
+    ["email", "Email Address", "email"],
   ],
   principal: [
     ["address", "Building No. / Flat No. / Building Name", "text", true],
@@ -339,7 +342,7 @@ export function Registration() {
           ...(key === "principal" ? { district: r?.partA.district || "" } : {}),
         }
       : {}),
-    ...(["promoters", "signatory", "principal"].includes(key)
+    ...(["promoters", "signatory", "principal", "representative"].includes(key)
       ? { email: user?.email || "", mobile: r?.partA.mobile || "" }
       : {}),
     ...(key === "representative" ? { appointed: "No" } : {}),
@@ -556,10 +559,21 @@ export function Registration() {
                       (p) => p.alsoSignatory === "Yes",
                     ) || r.tabs.promoters;
                   if (promoter)
-                    setValues({
-                      ...promoter,
-                      primary: "Yes",
-                      records: undefined,
+                    setValues((old) => {
+                      const copy = {
+                        ...defaults("signatory", promoter),
+                        primary: old.primary || "Yes",
+                      };
+                      return {
+                        ...copy,
+                        ...(old.records
+                          ? {
+                              records: old.records.map((record, index) =>
+                                index === recordIndex ? copy : record,
+                              ),
+                            }
+                          : {}),
+                      };
                     });
                 }}
               >
@@ -600,6 +614,16 @@ export function Registration() {
               {FIELDS[tab]
                 .filter(
                   ([key]) =>
+                    !(
+                      tab === "representative" &&
+                      key !== "appointed" &&
+                      values.appointed !== "Yes"
+                    ) &&
+                    !(
+                      tab === "additional" &&
+                      key !== "hasAdditional" &&
+                      values.hasAdditional !== "Yes"
+                    ) &&
                     !(
                       tab === "business" &&
                       key === "cin" &&
@@ -672,7 +696,12 @@ export function Registration() {
                     <Select
                       key={key}
                       label={label}
-                      required={required}
+                      required={
+                        required ||
+                        (tab === "additional" &&
+                          values.hasAdditional === "Yes" &&
+                          key === "possession")
+                      }
                       options={type}
                       value={values[key] ?? defaults(tab)[key] ?? ""}
                       onChange={(e) => setField(key, e.target.value)}
@@ -681,8 +710,21 @@ export function Registration() {
                     <Input
                       key={key}
                       label={label}
-                      required={required}
+                      required={
+                        required ||
+                        (tab === "additional" &&
+                          values.hasAdditional === "Yes" &&
+                          ["address", "city", "pincode"].includes(key)) ||
+                        (tab === "representative" &&
+                          values.appointed === "Yes" &&
+                          key === "name")
+                      }
                       type={type}
+                      disabled={
+                        tab === "business" &&
+                        key === "liabilityDate" &&
+                        values.reason === "Voluntary Basis"
+                      }
                       readOnly={
                         ["principal", "additional"].includes(tab) &&
                         key === "state"
